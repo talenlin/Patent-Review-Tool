@@ -1,7 +1,7 @@
 {
   "name": "patent-reader",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Windows 本地专利阅读与图文关联辅助工具",
   "type": "module",
   "main": "electron/main.cjs",

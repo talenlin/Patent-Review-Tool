@@ -2806,7 +2806,7 @@ dependencies = [
 
 [[package]]
 name = "patent-reader-v1"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "base64 0.22.1",
  "lopdf",
