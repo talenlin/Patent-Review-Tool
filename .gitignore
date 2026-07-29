@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+app/node_modules/
+
+# Build outputs
+dist/
+app/dist/
+app/release/
+rust-v1/src-tauri/target*/
+release/
+output/
+app/output/
+app/test-results/
+app/.playwright-cli/
+.playwright-cli/
+app/*.exe
+app/eng.traineddata
+
+# Local patent samples and QA captures
+example/
+problem/
+test/
+*.docx
+*.pdf
+*.xlsx
+*.png
+
+# Logs and local machine state
+*.log
+*.local
+.DS_Store
+.idea/
+.vscode/

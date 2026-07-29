@@ -1,0 +1,65 @@
+{
+  "name": "patent-reader",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Windows 本地专利阅读与图文关联辅助工具",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev:renderer\" \"npm run dev:electron\"",
+    "dev:renderer": "vite",
+    "dev:electron": "wait-on tcp:5187 && npm exec --yes --package electron@40.0.0 -- electron .",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint --ignore-pattern=public/**",
+    "test:regression": "node --experimental-strip-types scripts/regression-check.mjs && node --experimental-strip-types scripts/four-digit-reference-regression.mjs",
+    "preview": "vite preview",
+    "dist": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "lucide-react": "^1.27.0",
+    "mammoth": "^1.12.0",
+    "pdfjs-dist": "^5.4.624",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tesseract.js": "^7.0.0"
+  },
+  "build": {
+    "appId": "com.local.patentreader",
+    "productName": "专利阅研",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "专利阅研-V${version}-Windows-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.0",
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "concurrently": "^10.0.4",
+    "electron": "^40.0.0",
+    "electron-builder": "^26.15.3",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1",
+    "wait-on": "^9.1.0"
+  }
+}
