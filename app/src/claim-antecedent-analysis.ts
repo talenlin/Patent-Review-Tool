@@ -162,12 +162,20 @@ function parseDependencyNumbers(text: string) {
 export function parseClaims(text: string): ParsedClaim[] {
   const lines = text.replace(/\r/g, '').split('\n').map((line) => line.trim()).filter(Boolean)
   const headingIndex = lines.findIndex((line) => claimHeading.test(compact(line)))
-  const claimLines = headingIndex >= 0
-    ? lines.slice(headingIndex + 1, (() => {
-      const boundary = lines.slice(headingIndex + 1).findIndex((line) => claimBoundary.test(compact(line)))
-      return boundary < 0 ? undefined : boundary
-    })())
-    : lines
+  const candidateLines = headingIndex >= 0 ? lines.slice(headingIndex + 1) : lines
+  // DOCX headers are prepended to the text for section detection. Their
+  // “说明书/说明书附图” labels may follow “权利要求书” before any actual claim.
+  // A section boundary only becomes meaningful after the first numbered claim.
+  const claimLines: string[] = []
+  let sawClaimStart = false
+  for (const line of candidateLines) {
+    if (claimStart.test(line)) sawClaimStart = true
+    if (claimBoundary.test(compact(line))) {
+      if (sawClaimStart) break
+      continue
+    }
+    claimLines.push(line)
+  }
   const claims: ParsedClaim[] = []
   let current: { number: number; fragments: string[] } | null = null
   const flush = () => {

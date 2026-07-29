@@ -10,6 +10,17 @@ const parsed = parseClaims(multiDependentClaims)
 assert.deepEqual(parsed.map((claim) => claim.number), [1, 2, 3], '应逐项解析权利要求')
 assert.deepEqual(parsed[2].dependencies, [1, 2], '多项从属应保留所有可能引用路径')
 
+// DOCX parsing prepends page-header markers before the actual document text.
+// The marker “说明书” must not terminate claims before the first numbered claim.
+const docxTextWithHeaderMarkers = `说明书摘要
+摘要附图
+权利要求书
+说明书
+说明书附图
+1、一种片材载具，包括一个载具主体。
+2、根据权利要求1所述的片材载具，其特征在于，所述载具主体包括顶板。`
+assert.deepEqual(parseClaims(docxTextWithHeaderMarkers).map((claim) => claim.number), [1, 2], 'DOCX 页首标记不应导致权利要求解析为空')
+
 const missing = analyzeClaimAntecedentBasis(multiDependentClaims)
 assert.ok(missing.issues.some((issue) => issue.claimNumber === 3 && issue.kind === 'absolute-missing' && issue.term === '执行器'), '未引入的“所述执行器”应提示缺乏引用基础')
 
