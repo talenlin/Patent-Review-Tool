@@ -1,27 +1,171 @@
-# Patent Review Tool / 专利阅研
+# 专利阅研 Patent Review Tool
 
-Windows local patent reading and review assistant for patent agents and IP engineers.
+专利阅研是一款面向专利代理师、企业知识产权工程师的 Windows 本地专利阅读辅助工具。它的核心目标是：在阅读本地 DOCX/PDF 专利稿件时，快速建立“说明书、权利要求书、附图、附图标记”之间的对应关系，并把审阅意见直接批注回修订版文件中。
 
-## What it does
+当前 GitHub 正式发布版本：`v1.0.0`
 
-- Reads local DOCX and searchable PDF patent drafts.
-- Splits common Chinese patent sections: abstract, claims, specification, and drawings.
-- Extracts reference-sign to feature-name mappings from the specification first, then falls back to contextual extraction.
-- Shows drawings beside the text and overlays draggable, closable labels on recognized reference signs.
-- Supports local OCR by default and optional cloud OCR providers configured by the user.
-- Writes review comments back into revised DOCX/PDF files instead of using a sidecar data file.
-- Saves revised files with `-修订版` in the filename by default.
-- Exports patent rating records when saving a revised version.
+## 下载与安装
 
-## Privacy Model
+进入发布页下载：
 
-The main workflow is local-first. Original files, text, claims, and comments stay on the user's machine.
+[https://github.com/talenlin/Patent-Review-Tool/releases/tag/v1.0.0](https://github.com/talenlin/Patent-Review-Tool/releases/tag/v1.0.0)
 
-When a cloud OCR provider is enabled, only drawing images are sent to the selected OCR service for reference-sign recognition.
+推荐下载方式：
 
-## Development
+- 安装版：`PatentReviewTool_V1.0.0_x64_setup.exe`
+- 免安装版：`PatentReviewTool_V1.0.0_portable.zip`
 
-Frontend:
+如果只是快速试用，建议先下载免安装版，解压后直接运行即可。
+
+## 支持的文件
+
+- DOCX：优先支持中文专利初稿、专利申请文件、包含说明书附图的综合稿件。
+- PDF：支持可检索 PDF。扫描版 PDF 需要依赖 OCR，识别效果取决于图片质量和 OCR 设置。
+
+工具默认不会改动原文件。保存时会生成新文件，并在原文件名后自动增加 `-修订版`。
+
+例如：
+
+```text
+一种太阳能电池.docx
+一种太阳能电池-修订版.docx
+```
+
+## 基本使用流程
+
+1. 打开工具。
+2. 选择本地 DOCX 或 PDF 专利文件。
+3. 在“文档结构确认”页面检查各阅读区段是否识别正确。
+4. 确认后进入阅读界面。
+5. 在右侧“批注与关联”区域确认“标号-特征”映射。
+6. 点击“确认并应用映射”，工具会在附图区域生成浮动标记。
+7. 阅读正文时选中文本，在右侧填写批注内容并添加批注。
+8. 完成审阅后点击“保存修订版”。
+
+## 文档结构确认
+
+不同代理机构的模板顺序可能不同，例如“说明书摘要、摘要附图、权利要求书、说明书、说明书附图”的顺序不一定固定。
+
+工具会根据页首、标题和正文特征尝试识别：
+
+- 说明书摘要
+- 权利要求书
+- 说明书
+- 说明书附图
+
+如果识别不准，可以在确认页面手动调整对应区段。确认后再进入阅读，可以减少后续图文关联错误。
+
+## 图文关联
+
+工具会优先从说明书中的“附图标记”段落提取标号和特征名称；如果没有明确的附图标记段落，则会从全文上下文中提取候选。
+
+确认映射时：
+
+- 每个标号只显示一次。
+- 默认选中出现频率更高、置信度更高的特征名称。
+- 如果一个标号有多个候选名称，可以点击下拉框手动选择。
+- 可以删除错误标号。
+- 可以通过“自定义补充”手动增加标号。
+
+确认后，工具会按最终映射表在正文和附图之间建立关联。
+
+## 附图浮动标记
+
+附图区域会显示识别到的标号对应特征，例如 `阀座 1`、`出口 12`。
+
+可用操作：
+
+- 拖动浮动标记，避免遮挡附图细节。
+- 点击标记上的关闭按钮，隐藏单个错误标记。
+- 双击附图，可打开独立查看窗口并放大缩小。
+- 点击正文或浮动标记，可辅助定位对应特征。
+
+工具默认不把浮动标记写入原文档；它们主要用于阅读辅助。
+
+## OCR 设置
+
+默认使用本地 OCR。也可以在顶部 OCR 入口中切换云 OCR。
+
+当前支持：
+
+- 本机 OCR
+- OCR.Space
+- Google Cloud Vision
+- PaddleOCR
+- 自定义 OCR 接口
+
+云 OCR 需要用户自行填写 API Key 或服务地址。工具会在设置弹窗中提供对应 API 获取入口。
+
+隐私承诺：
+
+- 正文、权利要求、批注内容、原始文件不会上传。
+- 启用云 OCR 时，仅上传附图图片用于识别图中标号。
+- API Key 保存在本机。
+
+## 添加批注
+
+进入审阅模式后：
+
+1. 在正文阅读区选中需要批注的文字。
+2. 右侧会锁定当前选区。
+3. 选择批注类型和程度。
+4. 填写批注人和批注内容。
+5. 点击“添加批注”。
+
+保存修订版后，DOCX 批注会以 WPS/Word 可查看的原生批注形式写入文件。
+
+常见批注类型包括：
+
+- 图文不一致
+- 缺乏支持
+- 表述不清楚
+- 缺少数据支持
+- 其他审阅意见
+
+## 专利整体评级
+
+右侧批注区域下方提供整体评级：
+
+- 技术理解评级：A/B/C/D
+- 沟通评级：A/B/C/D
+- 专利质量评级：A/B/C/D
+
+保存修订版时，工具会额外生成一份 XLSX 评分留存文件，便于机构内部归档和复盘。
+
+## 热加载新文档
+
+顶部文件夹图标可用于重新选择文件。处理完一份文档后，不需要关闭工具，点击该图标即可打开另一份本地专利文件。
+
+## 常见问题
+
+### 为什么有些 PDF 无法读取？
+
+如果 PDF 是空文件、下载未完成、加密文件，或不是可检索 PDF，工具可能无法读取。请确认文件已经完整下载，并且可以用普通 PDF 阅读器正常打开。
+
+### 为什么附图标号识别不全？
+
+附图 OCR 会受到线条密度、图像清晰度、扫描质量、标号字体、引出线干扰等影响。可以尝试：
+
+- 使用更清晰的 DOCX/PDF。
+- 切换 OCR 服务。
+- 手动补充缺失标号。
+- 删除少量误识别标号。
+
+### 数字 0 会被当作标号吗？
+
+默认不会。单独的数字 `0` 通常不是专利附图标号，工具会默认过滤。
+
+### 工具会覆盖原文件吗？
+
+不会。默认保存为 `-修订版` 文件。
+
+### 云 OCR 会上传整篇专利吗？
+
+不会。云 OCR 只上传附图图片用于识别标号。
+
+## 本地开发
+
+前端开发：
 
 ```powershell
 cd app
@@ -29,7 +173,7 @@ npm install
 npm run dev
 ```
 
-Production build:
+生产构建：
 
 ```powershell
 cd app
@@ -39,8 +183,6 @@ cd ..\rust-v1\src-tauri
 cargo tauri build
 ```
 
-## Release
+## 版本说明
 
-This repository publishes the current stable product line as `v1.0.0`.
-
-The source version and Tauri application metadata are both set to `1.0.0`.
+`v1.0.0` 是当前首个正式 GitHub 发布版本，对应此前本地验证通过的 V1.2.4 功能状态。
