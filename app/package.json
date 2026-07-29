@@ -6,8 +6,10 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k \"npm run dev:renderer\" \"npm run dev:electron\"",
+    "dev": "npm run build && npm run dev:rust",
     "dev:renderer": "vite",
+    "dev:rust": "cd /d ..\\rust-v1\\src-tauri && cargo run",
+    "dev:legacy-electron": "concurrently -k \"npm run dev:renderer\" \"npm run dev:electron\"",
     "dev:electron": "wait-on tcp:5187 && npm exec --yes --package electron@40.0.0 -- electron .",
     "build": "tsc -b && vite build",
     "lint": "oxlint --ignore-pattern=public/**",

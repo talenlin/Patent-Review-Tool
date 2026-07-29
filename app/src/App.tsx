@@ -143,6 +143,21 @@ function pdfSectionForPage(pageNumber: number, sections: PatentSection[]) {
     .sort((first, second) => second.start - first.start)[0]?.key ?? null
 }
 
+function blocksForClaim(root: HTMLElement, claimNumber: number) {
+  const blocks = Array.from(root.querySelectorAll<HTMLElement>('p, h1, h2, h3, li'))
+  const startPattern = new RegExp(`^\\s*${claimNumber}\\s*[.．、]`)
+  const anyClaimPattern = /^\s*\d{1,4}\s*[.．、]/
+  const startIndex = blocks.findIndex((block) => startPattern.test(block.textContent ?? ''))
+  if (startIndex < 0) return []
+  const collected: HTMLElement[] = []
+  for (let index = startIndex; index < blocks.length; index += 1) {
+    const block = blocks[index]
+    if (index > startIndex && anyClaimPattern.test(block.textContent ?? '')) break
+    collected.push(block)
+  }
+  return collected
+}
+
 function App() {
   const [file, setFile] = useState<LoadedFile | null>(null)
   const [stage, setStage] = useState<'welcome' | 'structure' | 'workspace'>('welcome')
@@ -346,33 +361,37 @@ function App() {
       const pageElement = page ? root.querySelector<HTMLElement>(`.pdf-page-shell[data-page-number="${page.pageNumber}"]`) : null
       if (pageElement) {
         pageElement.querySelectorAll<HTMLElement>('.pdf-text-item').forEach((item) => {
-          if (item.textContent?.includes(issue.term)) item.classList.add('claim-issue-text-highlight')
+          if (item.textContent?.includes(issue.highlightText)) item.classList.add('claim-issue-text-highlight')
         })
         pageElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
       }
       return
     }
-    const block = Array.from(root.querySelectorAll<HTMLElement>('p, h1, h2, h3, li'))
-      .find((candidate) => claimStartPattern.test(candidate.textContent ?? ''))
-    if (block) {
+    const blocks = blocksForClaim(root, issue.claimNumber)
+    for (const block of blocks) {
       const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT)
       let node = walker.nextNode()
+      let highlighted = false
       while (node) {
         const textNode = node as Text
-        const start = textNode.textContent?.indexOf(issue.term) ?? -1
+        const start = textNode.textContent?.indexOf(issue.highlightText) ?? -1
         if (start >= 0) {
           const range = document.createRange()
           range.setStart(textNode, start)
-          range.setEnd(textNode, start + issue.term.length)
+          range.setEnd(textNode, start + issue.highlightText.length)
           const mark = document.createElement('mark')
           mark.dataset.claimIssueHighlight = 'true'
           mark.className = 'claim-issue-inline-highlight'
           range.surroundContents(mark)
+          highlighted = true
           break
         }
         node = walker.nextNode()
       }
-      block.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      if (highlighted) {
+        block.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        break
+      }
     }
   }, [activeClaimIssueId, claimBasisAnalysis, file, stage])
 
@@ -967,7 +986,7 @@ function App() {
                   ? <div className="claim-basis-empty">暂未识别到可解析的权利要求条目。请先在“文档结构”中确认权利要求书位置。</div>
                   : claimBasisAnalysis.issues.length === 0
                     ? <div className="claim-basis-clear"><Check size={16} /> 已校验 {claimBasisAnalysis.claims.length} 项权利要求，暂未发现需要人工核对的引用基础问题。</div>
-                    : <div className="claim-issue-list">{claimBasisAnalysis.issues.map((issue) => <button key={issue.id} type="button" className={`claim-issue ${activeClaimIssueId === issue.id ? 'active' : ''}`} onClick={() => navigateToClaimIssue(issue)}><div><span className={`claim-issue-severity ${issue.severity}`}>{issue.severity}</span><strong>权 {issue.claimNumber} · {issue.term}</strong></div><p>{issue.message}</p><small>{issue.sources.length ? `引用基础：${issue.sources.map((source) => `权${source.claimNumber}“${source.term}”${source.preamble ? '（前序）' : ''}`).join('；')}` : `已检查 ${issue.paths.length} 条继承路径，未找到首次引入。`}</small></button>)}</div>}
+                    : <div className="claim-issue-list">{claimBasisAnalysis.issues.map((issue) => <button key={issue.id} type="button" className={`claim-issue ${activeClaimIssueId === issue.id ? 'active' : ''}`} onClick={() => navigateToClaimIssue(issue)}><div><span className={`claim-issue-severity ${issue.severity}`}>{issue.severity}</span><strong>权 {issue.claimNumber} · {issue.highlightText}</strong></div><p>{issue.message}</p><small>{issue.sources.length ? `引用基础：${issue.sources.map((source) => `权${source.claimNumber}“${source.term}”${source.preamble ? '（前序）' : ''}`).join('；')}` : `已检查 ${issue.paths.length} 条继承路径，未找到首次引入。`}</small></button>)}</div>}
               </>}
           </section>
           <div className="annotation-form">

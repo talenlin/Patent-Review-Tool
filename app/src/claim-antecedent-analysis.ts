@@ -4,6 +4,7 @@ export type ClaimIssue = {
   id: string
   claimNumber: number
   term: string
+  highlightText: string
   kind: ClaimIssueKind
   severity: '重要' | '一般' | '提示'
   message: string
@@ -36,14 +37,14 @@ const claimHeading = /^权\s*利\s*要\s*求\s*书$/
 const claimBoundary = /^(?:说明书(?:摘要|附图)?|发明名称|技术领域|背景技术|具体实施方式|实施方式|附图说明)$/
 const claimStart = /^\s*(\d{1,4})\s*[.．、]\s*(.+)$/
 const referencePrefix = /(?:所述|上述|前述|该)\s*(?:的\s*)?/g
-const introducingPrefix = /(?:一种|一个|一套|一台|一组|一对|一条|一件|一端|一部|一块|一根|一层|一片|一孔|一腔|一阀|一管|一路|一面|一体|一轴|至少一个|至少一|多个|若干|每个)\s*/g
+const introducingPrefix = /(?:一种|一个|一套|一台|一组|一对|一条|一件|一端|一部|一块|一根|一层|一片|一孔|一腔|一阀|一管|一路|一面|一体|一轴|至少一个|至少一|多个|若干|每个|两个|两)\s*/g
 const ordinalPrefix = /^(?:第[一二三四五六七八九十百零〇\d]+|[一二三四五六七八九十\d]+)\s*/
 const ignoredBases = new Set(['特征', '部分', '方式', '装置', '方法', '系统', '部件', '组件', '机构', '结构', '本体', '产品', '权利要求', '实施例'])
 const technicalNounHeads = [
   '控制装置', '制冷设备', '循环管路', '阀芯组件', '流通间隙', '封堵面积', '横截面积', '最小间隙',
   '第一方向', '第二方向', '初始温度', '第一温度', '第二温度', '初始长度', '第一长度', '第二长度',
   '固定件', '调节阀', '波纹管', '弹性件', '导流孔', '出气孔', '阀座', '阀杆', '阀头', '流道',
-  '氦气', '进口', '出口', '面积', '长度', '温度', '方向', '压力',
+  '氦气', '进口', '出口', '侧板', '顶板', '底板', '容纳腔', '导向孔', '抵接部', '抵接面', '导杆', '面积', '长度', '温度', '方向', '压力',
 ].sort((first, second) => second.length - first.length)
 
 function compact(value: string) {
@@ -58,7 +59,7 @@ function baseTerm(value: string) {
 }
 
 function quantity(value: string): TechnicalTerm['quantity'] {
-  if (/(?:多个|若干|至少两|两个以上|两?个以上|数个|多组|多条|多件|多层|多片)/.test(value)) return 'plural'
+  if (/(?:多个|若干|至少两|两个以上|两?个以上|数个|多组|多条|多件|多层|多片|两个|两)/.test(value)) return 'plural'
   if (/(?:一个|一种|一套|一台|一组|一对|一条|一件|一端|一部|一块|一根|一层|一片|一孔|一腔|一阀|一管|一路|一面|一体|一轴|至少一个|至少一)/.test(value)) return 'single'
   return 'neutral'
 }
@@ -92,7 +93,7 @@ function extractIntroducedTerms(text: string) {
   const opening = text.match(/^\s*一(?:种|个|套|台|组|对|条|件)?\s*([\u4e00-\u9fff]{2,30})/)
   if (opening?.[1]) add(opening[1], 0, true, true)
 
-  const pattern = /(?:一种|一个|一套|一台|一组|一对|一条|一件|一端|一部|一块|一根|一层|一片|一孔|一腔|一阀|一管|一路|一面|一体|一轴|至少一个|至少一|多个|若干|每个)\s*((?:第[一二三四五六七八九十百零〇\d]+)?[\u4e00-\u9fff]{1,30}?)(?=(?:和|与|及|或|、|，|,|；|;|。|\.|包括|包含|具有|连接|设置|形成|配置|安装|位于|用于|以便|从而|并且|其中|$))/g
+  const pattern = /(?:一种|一个|一套|一台|一组|一对|一条|一件|一端|一部|一块|一根|一层|一片|一孔|一腔|一阀|一管|一路|一面|一体|一轴|至少一个|至少一|多个|若干|每个|两个|两)\s*((?:第[一二三四五六七八九十百零〇\d]+)?[\u4e00-\u9fff]{1,30}?)(?=(?:和|与|及|或|、|，|,|；|;|。|\.|包括|包含|具有|连接|设置|形成|配置|安装|位于|用于|以便|从而|并且|其中|$))/g
   for (const match of text.matchAll(pattern)) {
     if (match.index === undefined) continue
     add(match[0], match.index, match.index < preambleEnd)
@@ -111,26 +112,30 @@ function extractIntroducedTerms(text: string) {
 }
 
 function findKnownBase(raw: string, known: TechnicalTerm[]) {
+  const directRaw = compact(raw)
+  const directCandidates = known.filter((term) => directRaw.startsWith(compact(term.term)))
+  if (directCandidates.length) return { base: directCandidates[0].base, candidates: directCandidates, displayTerm: directCandidates[0].term, exactMatch: true }
   const compactRaw = baseTerm(raw)
   const candidates = known.filter((term) => compactRaw.startsWith(term.base))
-  if (candidates.length) return { base: candidates[0].base, candidates }
+  if (candidates.length) return { base: candidates[0].base, candidates, displayTerm: baseTerm(cutPhrase(raw)), exactMatch: false }
   const derived = technicalNounHeads.find((term) => compactRaw.startsWith(term)) ?? baseTerm(cutPhrase(raw))
-  return { base: derived, candidates: [] as TechnicalTerm[] }
+  return { base: derived, candidates: [] as TechnicalTerm[], displayTerm: derived, exactMatch: false }
 }
 
 function extractReferringTerms(text: string, known: TechnicalTerm[]) {
-  const references: Array<{ term: string; base: string; quantity: TechnicalTerm['quantity']; offset: number; known: TechnicalTerm[] }> = []
+  const references: Array<{ term: string; base: string; quantity: TechnicalTerm['quantity']; offset: number; known: TechnicalTerm[]; exactMatch: boolean }> = []
   for (const match of text.matchAll(referencePrefix)) {
     if (match.index === undefined) continue
     const raw = text.slice(match.index + match[0].length, match.index + match[0].length + 36)
     const found = findKnownBase(raw, known)
     if (!isUsableBase(found.base)) continue
     references.push({
-      term: found.candidates[0]?.term ?? cutPhrase(raw),
+      term: found.displayTerm,
       base: found.base,
       quantity: quantity(raw),
       offset: match.index,
       known: found.candidates,
+      exactMatch: found.exactMatch,
     })
   }
   return references
@@ -255,7 +260,9 @@ export function analyzeClaimAntecedentBasis(text: string): ClaimAntecedentAnalys
       const sourcesForPath = paths.map((path) => {
         const explicit = path
         .flatMap((number) => (introducedByClaim.get(number) ?? []).map((term) => ({ ...term, claimNumber: number })))
-        .filter((term) => term.base === reference.base && (term.claimNumber !== claim.number || term.offset < reference.offset))
+        .filter((term) => term.base === reference.base
+          && (!reference.exactMatch || reference.known.some((candidate) => candidate.term === term.term))
+          && (term.claimNumber !== claim.number || term.offset < reference.offset))
         if (explicit.length) return explicit
         return path.flatMap((number) => {
           const sourceClaim = byNumber.get(number)
@@ -281,11 +288,12 @@ export function analyzeClaimAntecedentBasis(text: string): ClaimAntecedentAnalys
       const key = `${claim.number}:${kind}:${reference.base}`
       if (seen.has(key)) continue
       seen.add(key)
-      const meta = issueMeta(kind, reference.base, claim.number)
+      const meta = issueMeta(kind, reference.term, claim.number)
       issues.push({
         id: key,
         claimNumber: claim.number,
         term: reference.base,
+        highlightText: reference.term,
         kind,
         severity: meta.severity,
         message: meta.message,

@@ -47,4 +47,13 @@ const bodyReferenceClaims = `权利要求书
 2、一种上下料装置，其特征在于，包括：权利要求1所述的片材载具。`
 assert.deepEqual(parseClaims(bodyReferenceClaims)[1].dependencies, [1], '“权利要求1所述的……”也应建立继承引用关系')
 
+const ordinalReferenceClaims = `权利要求书
+1、一种载具，包括一个第一抵接面和一个第二抵接面。
+2、根据权利要求1所述的载具，其特征在于，所述第一抵接面朝向压板。`
+assert.ok(!analyzeClaimAntecedentBasis(ordinalReferenceClaims).issues.some((issue) => issue.term === '抵接面'), '“所述第一抵接面”应优先匹配同名的第一抵接面，不应误报为泛称歧义')
+
+const pluralFeatureClaims = `权利要求书
+1、一种载具，包括两个侧板，两个所述侧板围合形成容纳腔。`
+assert.ok(!analyzeClaimAntecedentBasis(pluralFeatureClaims).issues.some((issue) => issue.term === '侧板'), '“两个侧板”应视为首次引入，后续所述侧板不应报缺失')
+
 console.log('权利要求引用基础判断回归检查通过')
