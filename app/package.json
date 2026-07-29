@@ -11,7 +11,7 @@
     "dev:electron": "wait-on tcp:5187 && npm exec --yes --package electron@40.0.0 -- electron .",
     "build": "tsc -b && vite build",
     "lint": "oxlint --ignore-pattern=public/**",
-    "test:regression": "node --experimental-strip-types scripts/regression-check.mjs && node --experimental-strip-types scripts/four-digit-reference-regression.mjs",
+    "test:regression": "node --experimental-strip-types scripts/regression-check.mjs && node --experimental-strip-types scripts/four-digit-reference-regression.mjs && node --experimental-strip-types scripts/claim-antecedent-regression.mjs",
     "preview": "vite preview",
     "dist": "npm run build && electron-builder --win"
   },

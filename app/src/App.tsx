@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowLeft, BookOpenText, Check, ChevronDown, ChevronRight, ChevronUp, FileText, FolderOpen,
+  AlertTriangle, ArrowLeft, BookOpenText, Check, ChevronDown, ChevronRight, ChevronUp, FileText, FolderOpen,
   Cloud, Highlighter, Image, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Plus, Save, Settings2, ShieldCheck, Sparkles, Tag, Trash2, Undo2,
 } from 'lucide-react'
 import './App.css'
@@ -17,6 +17,7 @@ import {
 } from './document-analysis'
 import { parsePdf, type PdfPageData } from './pdf-analysis'
 import { findDocxSectionTarget, scrollTargetWithin } from './section-navigation'
+import { analyzeClaimAntecedentBasis, type ClaimIssue } from './claim-antecedent-analysis'
 
 type LoadedFile = {
   path: string
@@ -173,6 +174,8 @@ function App() {
   const [isOcrSettingsOpen, setIsOcrSettingsOpen] = useState(false)
   const [cloudOcrUsage, setCloudOcrUsage] = useState<CloudOcrUsage | null>(null)
   const [isAssociationCollapsed, setIsAssociationCollapsed] = useState(false)
+  const [isClaimBasisCollapsed, setIsClaimBasisCollapsed] = useState(false)
+  const [activeClaimIssueId, setActiveClaimIssueId] = useState<string | null>(null)
   const [ratings, setRatings] = useState<PatentRatings>(emptyRatings)
   const [expandedFigure, setExpandedFigure] = useState<{ source: string; index: number } | null>(null)
   const [expandedFigureScale, setExpandedFigureScale] = useState(1)
@@ -202,6 +205,7 @@ function App() {
     })
     return selected
   }, [confirmedMappings, mappingConfirmed, mappingSelections, referenceGroups])
+  const claimBasisAnalysis = useMemo(() => analyzeClaimAntecedentBasis(file?.text ?? ''), [file])
   const isDesktop = Boolean(window.patentReader)
 
   function clearLockedSelection() {
@@ -326,6 +330,34 @@ function App() {
     target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }, [activeReference, file, mappingConfirmed, references, stage])
 
+  // Claim-basis findings use a separate visual marker so they do not interfere
+  // with the confirmed figure-reference highlights above.
+  useEffect(() => {
+    const root = readingRef.current
+    if (!root) return
+    root.querySelectorAll<HTMLElement>('.claim-issue-block-highlight').forEach((block) => block.classList.remove('claim-issue-block-highlight'))
+    root.querySelectorAll<HTMLElement>('.claim-issue-page-highlight').forEach((page) => page.classList.remove('claim-issue-page-highlight'))
+    if (!activeClaimIssueId) return
+    const issue = claimBasisAnalysis.issues.find((item) => item.id === activeClaimIssueId)
+    if (!issue) return
+    const claimStartPattern = new RegExp(`^\\s*${issue.claimNumber}\\s*[.．、]`)
+    if (file?.extension === 'pdf') {
+      const page = file.pdfPages.find((candidate) => claimStartPattern.test(candidate.text))
+      const pageElement = page ? root.querySelector<HTMLElement>(`.pdf-page-shell[data-page-number="${page.pageNumber}"]`) : null
+      if (pageElement) {
+        pageElement.classList.add('claim-issue-page-highlight')
+        pageElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+      return
+    }
+    const block = Array.from(root.querySelectorAll<HTMLElement>('p, h1, h2, h3, li'))
+      .find((candidate) => claimStartPattern.test(candidate.textContent ?? ''))
+    if (block) {
+      block.classList.add('claim-issue-block-highlight')
+      block.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [activeClaimIssueId, claimBasisAnalysis, file, stage])
+
   useEffect(() => {
     const root = figuresRef.current
     if (!root) return
@@ -446,6 +478,13 @@ function App() {
     setActiveReference(reference.id)
     setMode('review')
     setNotice(`已定位并高亮：${reference.name} ${reference.number}`)
+  }
+
+  function navigateToClaimIssue(issue: ClaimIssue) {
+    setActiveClaimIssueId(issue.id)
+    setActiveSection('claims')
+    setMode('review')
+    setNotice(`已定位权利要求 ${issue.claimNumber}：${issue.message}`)
   }
 
   function chooseCandidate(number: string, id: string) {
@@ -607,6 +646,8 @@ function App() {
       setConfirmedMappings({})
       setMappingConfirmed(false)
       setIsAssociationCollapsed(false)
+      setIsClaimBasisCollapsed(false)
+      setActiveClaimIssueId(null)
       setActiveReference(null)
       setActiveSection('description')
       setMode('reading')
@@ -895,6 +936,22 @@ function App() {
                 {mappingConfirmed && <div className="applied-reference-list">{[...selectedReferences.values()].map((reference) => <button key={reference.id} className={`reference-item ${activeReference === reference.id ? 'active' : ''}`} onClick={() => navigateToReference(reference)}><span className="reference-number">{reference.number}</span><span className="reference-name">{reference.name}</span><span className="reference-confidence high">已应用</span></button>)}</div>}
               </div>
             </section>}
+          <section className={`claim-basis-card ${isClaimBasisCollapsed ? 'collapsed' : ''}`}>
+            <div className="claim-basis-heading">
+              <div><span className="eyebrow">权利要求 · 离线校验</span><h3>引用基础判断</h3></div>
+              <button type="button" className="claim-basis-collapse" onClick={() => setIsClaimBasisCollapsed((current) => !current)} aria-label={isClaimBasisCollapsed ? '展开引用基础判断' : '收起引用基础判断'} title={isClaimBasisCollapsed ? '展开' : '收起'}>{isClaimBasisCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}</button>
+            </div>
+            {isClaimBasisCollapsed
+              ? <button type="button" className="claim-basis-summary" onClick={() => setIsClaimBasisCollapsed(false)}><AlertTriangle size={14} /><span>{claimBasisAnalysis.claims.length ? `已校验 ${claimBasisAnalysis.claims.length} 项权利要求${claimBasisAnalysis.issues.length ? `，发现 ${claimBasisAnalysis.issues.length} 项待核对` : '，未发现需提示事项'}` : '未识别到权利要求书正文'}</span></button>
+              : <>
+                <p className="claim-basis-description">核对“所述 / 该 / 上述”等定指用语是否能沿从属引用链追溯到首次引入；多项从属按每条路径分别校验。</p>
+                {claimBasisAnalysis.claims.length === 0
+                  ? <div className="claim-basis-empty">暂未识别到可解析的权利要求条目。请先在“文档结构”中确认权利要求书位置。</div>
+                  : claimBasisAnalysis.issues.length === 0
+                    ? <div className="claim-basis-clear"><Check size={16} /> 已校验 {claimBasisAnalysis.claims.length} 项权利要求，暂未发现需要人工核对的引用基础问题。</div>
+                    : <div className="claim-issue-list">{claimBasisAnalysis.issues.map((issue) => <button key={issue.id} type="button" className={`claim-issue ${activeClaimIssueId === issue.id ? 'active' : ''}`} onClick={() => navigateToClaimIssue(issue)}><div><span className={`claim-issue-severity ${issue.severity}`}>{issue.severity}</span><strong>权 {issue.claimNumber} · {issue.term}</strong></div><p>{issue.message}</p><small>{issue.sources.length ? `引用基础：${issue.sources.map((source) => `权${source.claimNumber}“${source.term}”${source.preamble ? '（前序）' : ''}`).join('；')}` : `已检查 ${issue.paths.length} 条继承路径，未找到首次引入。`}</small></button>)}</div>}
+              </>}
+          </section>
           <div className="annotation-form">
             {selectedText ? <div className="selection-context"><div><span>已锁定原文选区</span><p>“{selectedText}”</p></div><button type="button" onClick={clearLockedSelection}>取消</button></div> : <div className="selection-guide">先在全文窗口选中原文；选区会保留在这里，再填写批注。</div>}
             <div className="form-row"><label>类型<select value={annotation.type} onChange={(event) => setAnnotation({ ...annotation, type: event.target.value })}><option>图文不一致</option><option>术语不一致</option><option>缺乏支持</option><option>表述不清楚</option><option>待核实</option><option>理解笔记</option></select></label><label>程度<select value={annotation.severity} onChange={(event) => setAnnotation({ ...annotation, severity: event.target.value })}><option>提示</option><option>一般</option><option>重要</option><option>阻塞</option></select></label></div>

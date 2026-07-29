@@ -182,4 +182,27 @@
 .suggestion-card.applied { border-color: #99d6c9; background: #eef9f6; }
 .applied-reference-list { display: grid; gap: 6px; max-height: 150px; margin: -5px 0 16px; overflow: auto; }
 .applied-reference-list .reference-item { grid-template-columns: 30px minmax(0, 1fr) auto; }
+.claim-basis-card { margin: 16px 0; padding: 14px; border: 1px solid #e1e8ec; border-radius: 9px; background: #fff; }
+.claim-basis-card.collapsed { padding: 10px 12px; }
+.claim-basis-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.claim-basis-heading h3 { margin: 2px 0 0; color: #263b4b; font-size: 15px; }
+.claim-basis-collapse { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid #d8e4e6; border-radius: 7px; background: #fff; color: #176b61; cursor: pointer; }
+.claim-basis-collapse:hover { border-color: #9fcfc5; background: #e8f4f2; }
+.claim-basis-description { margin: 9px 0 11px; color: #6f7f8c; font-size: 11px; line-height: 1.55; }
+.claim-basis-empty, .claim-basis-clear { padding: 10px; border-radius: 7px; background: #f4f7f8; color: #7b8995; font-size: 12px; line-height: 1.55; }
+.claim-basis-clear { display: flex; gap: 7px; align-items: flex-start; background: #f1faf7; color: #21766b; }
+.claim-basis-summary { display: flex; align-items: center; gap: 7px; width: 100%; margin-top: 9px; padding: 8px; border: 0; border-radius: 7px; background: #f3faf8; color: #396761; text-align: left; font-size: 11px; cursor: pointer; }
+.claim-issue-list { display: grid; gap: 7px; max-height: 280px; overflow: auto; }
+.claim-issue { width: 100%; padding: 10px; border: 1px solid #e4e9ec; border-radius: 7px; background: #fff; color: #405264; text-align: left; cursor: pointer; }
+.claim-issue:hover, .claim-issue.active { border-color: #e2b387; background: #fffaf5; }
+.claim-issue > div { display: flex; align-items: center; gap: 7px; }
+.claim-issue strong { font-size: 12px; }
+.claim-issue p { margin: 6px 0; color: #657583; font-size: 11px; line-height: 1.5; }
+.claim-issue small { display: block; color: #8a754f; font-size: 10px; line-height: 1.45; }
+.claim-issue-severity { display: inline-block; padding: 2px 5px; border-radius: 4px; background: #eef2f4; color: #637282; font-size: 10px; }
+.claim-issue-severity.重要 { background: #ffebe7; color: #b53e2d; }
+.claim-issue-severity.一般 { background: #fff1df; color: #a65d16; }
+.claim-issue-severity.提示 { background: #e7f1fb; color: #32709d; }
+.claim-issue-block-highlight { outline: 2px solid rgba(205, 123, 42, .58); outline-offset: 5px; border-radius: 3px; background: #fff8ed; }
+.claim-issue-page-highlight { box-shadow: inset 4px 0 #cc7b2a, 0 0 0 2px rgba(205, 123, 42, .25); }
 @media (max-width: 1250px) { .workspace { grid-template-columns: 190px minmax(0, 1fr) 332px; } .workspace.nav-collapsed { grid-template-columns: 56px minmax(0, 1fr) 332px; } .docx-reading { padding: 0 20px; } }
