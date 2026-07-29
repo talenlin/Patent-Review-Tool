@@ -330,13 +330,13 @@ function App() {
     target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }, [activeReference, file, mappingConfirmed, references, stage])
 
-  // Claim-basis findings use a separate visual marker so they do not interfere
-  // with the confirmed figure-reference highlights above.
+  // Claim-basis findings are marked at term level so a single diagnostic does
+  // not visually imply that the entire claim is defective.
   useEffect(() => {
     const root = readingRef.current
     if (!root) return
-    root.querySelectorAll<HTMLElement>('.claim-issue-block-highlight').forEach((block) => block.classList.remove('claim-issue-block-highlight'))
-    root.querySelectorAll<HTMLElement>('.claim-issue-page-highlight').forEach((page) => page.classList.remove('claim-issue-page-highlight'))
+    root.querySelectorAll<HTMLElement>('[data-claim-issue-highlight]').forEach((mark) => mark.replaceWith(document.createTextNode(mark.textContent ?? '')))
+    root.querySelectorAll<HTMLElement>('.claim-issue-text-highlight').forEach((item) => item.classList.remove('claim-issue-text-highlight'))
     if (!activeClaimIssueId) return
     const issue = claimBasisAnalysis.issues.find((item) => item.id === activeClaimIssueId)
     if (!issue) return
@@ -345,7 +345,9 @@ function App() {
       const page = file.pdfPages.find((candidate) => claimStartPattern.test(candidate.text))
       const pageElement = page ? root.querySelector<HTMLElement>(`.pdf-page-shell[data-page-number="${page.pageNumber}"]`) : null
       if (pageElement) {
-        pageElement.classList.add('claim-issue-page-highlight')
+        pageElement.querySelectorAll<HTMLElement>('.pdf-text-item').forEach((item) => {
+          if (item.textContent?.includes(issue.term)) item.classList.add('claim-issue-text-highlight')
+        })
         pageElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
       }
       return
@@ -353,7 +355,23 @@ function App() {
     const block = Array.from(root.querySelectorAll<HTMLElement>('p, h1, h2, h3, li'))
       .find((candidate) => claimStartPattern.test(candidate.textContent ?? ''))
     if (block) {
-      block.classList.add('claim-issue-block-highlight')
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT)
+      let node = walker.nextNode()
+      while (node) {
+        const textNode = node as Text
+        const start = textNode.textContent?.indexOf(issue.term) ?? -1
+        if (start >= 0) {
+          const range = document.createRange()
+          range.setStart(textNode, start)
+          range.setEnd(textNode, start + issue.term.length)
+          const mark = document.createElement('mark')
+          mark.dataset.claimIssueHighlight = 'true'
+          mark.className = 'claim-issue-inline-highlight'
+          range.surroundContents(mark)
+          break
+        }
+        node = walker.nextNode()
+      }
       block.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }
   }, [activeClaimIssueId, claimBasisAnalysis, file, stage])

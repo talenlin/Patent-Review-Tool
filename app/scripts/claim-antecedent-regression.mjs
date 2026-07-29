@@ -36,4 +36,15 @@ const quantityClaims = `权利要求书
 const quantity = analyzeClaimAntecedentBasis(quantityClaims)
 assert.ok(quantity.issues.some((issue) => issue.kind === 'quantity-mismatch' && issue.term === '传感器'), '单数首次引入与复数引用应提示数量不一致')
 
+const titleIntroducedClaims = `权利要求书
+1、一种片材载具，其特征在于，所述片材载具包括一个载具主体。
+2、根据权利要求1所述的片材载具，其特征在于，所述载具主体包括顶板。`
+const titleIntroduced = analyzeClaimAntecedentBasis(titleIntroducedClaims)
+assert.ok(!titleIntroduced.issues.some((issue) => issue.term === '片材载具'), '权利要求标题名称应视为已引入，不应单独提示前序引用风险')
+
+const bodyReferenceClaims = `权利要求书
+1、一种片材载具，包括一个载具主体。
+2、一种上下料装置，其特征在于，包括：权利要求1所述的片材载具。`
+assert.deepEqual(parseClaims(bodyReferenceClaims)[1].dependencies, [1], '“权利要求1所述的……”也应建立继承引用关系')
+
 console.log('权利要求引用基础判断回归检查通过')

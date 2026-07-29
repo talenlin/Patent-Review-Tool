@@ -203,6 +203,5 @@
 .claim-issue-severity.重要 { background: #ffebe7; color: #b53e2d; }
 .claim-issue-severity.一般 { background: #fff1df; color: #a65d16; }
 .claim-issue-severity.提示 { background: #e7f1fb; color: #32709d; }
-.claim-issue-block-highlight { outline: 2px solid rgba(205, 123, 42, .58); outline-offset: 5px; border-radius: 3px; background: #fff8ed; }
-.claim-issue-page-highlight { box-shadow: inset 4px 0 #cc7b2a, 0 0 0 2px rgba(205, 123, 42, .25); }
+.claim-issue-inline-highlight, .claim-issue-text-highlight { padding: 1px 2px; border-radius: 3px; background: #fff0d8; color: #9b4e10; box-shadow: inset 0 -2px 0 #e7a75f; }
 @media (max-width: 1250px) { .workspace { grid-template-columns: 190px minmax(0, 1fr) 332px; } .workspace.nav-collapsed { grid-template-columns: 56px minmax(0, 1fr) 332px; } .docx-reading { padding: 0 20px; } }

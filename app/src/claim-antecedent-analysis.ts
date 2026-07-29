@@ -27,6 +27,7 @@ type TechnicalTerm = {
   base: string
   quantity: 'single' | 'plural' | 'neutral'
   preamble: boolean
+  claimTitle: boolean
   offset: number
   claimNumber?: number
 }
@@ -77,19 +78,19 @@ function extractIntroducedTerms(text: string) {
     const transition = text.search(/(?:包括|包含|具有|其特征在于|，|,|；|;|:|：)/)
     return transition < 0 ? Math.min(text.length, 36) : transition
   })()
-  const add = (raw: string, offset: number, preamble: boolean) => {
+  const add = (raw: string, offset: number, preamble: boolean, claimTitle = false) => {
     const term = cutPhrase(raw).replace(introducingPrefix, '')
     const base = baseTerm(term)
     if (!isUsableBase(base)) return
-    if (!terms.some((item) => item.base === base && item.offset === offset)) {
-      terms.push({ term, base, quantity: quantity(raw), preamble, offset })
-    }
+    const existing = terms.find((item) => item.base === base && item.offset === offset)
+    if (existing) existing.claimTitle ||= claimTitle
+    else terms.push({ term, base, quantity: quantity(raw), preamble, claimTitle, offset })
   }
 
   // The first noun phrase in an independent claim is often introduced as
   // “一种……装置”; retaining it lets the UI warn about preamble-only support.
   const opening = text.match(/^\s*一(?:种|个|套|台|组|对|条|件)?\s*([\u4e00-\u9fff]{2,30})/)
-  if (opening?.[1]) add(opening[1], 0, true)
+  if (opening?.[1]) add(opening[1], 0, true, true)
 
   const pattern = /(?:一种|一个|一套|一台|一组|一对|一条|一件|一端|一部|一块|一根|一层|一片|一孔|一腔|一阀|一管|一路|一面|一体|一轴|至少一个|至少一|多个|若干|每个)\s*((?:第[一二三四五六七八九十百零〇\d]+)?[\u4e00-\u9fff]{1,30}?)(?=(?:和|与|及|或|、|，|,|；|;|。|\.|包括|包含|具有|连接|设置|形成|配置|安装|位于|用于|以便|从而|并且|其中|$))/g
   for (const match of text.matchAll(pattern)) {
@@ -136,7 +137,7 @@ function extractReferringTerms(text: string, known: TechnicalTerm[]) {
 }
 
 function parseDependencyNumbers(text: string) {
-  const dependencyMatch = text.match(/(?:根据|按照|依照)\s*权利要求\s*([^，。；;]*?)\s*所述/)
+  const dependencyMatch = text.match(/(?:(?:根据|按照|依照)\s*)?权利要求\s*([^，。；;]*?)\s*(?:所述|所示)/)
   if (!dependencyMatch) return []
   const expression = dependencyMatch[1]
   const numbers: number[] = []
@@ -210,7 +211,7 @@ function inferredBareSource(claim: ParsedClaim, base: string, beforeOffset = Num
     const prefix = sourceText.slice(Math.max(0, offset - 3), offset)
     if (!/(?:所述|上述|前述|该)$/.test(prefix)) {
       const preambleEnd = sourceText.search(/(?:包括|包含|具有|其特征在于|，|,|；|;|:|：)/)
-      return { term: base, base, quantity: 'neutral', preamble: preambleEnd >= 0 && offset < preambleEnd, offset, claimNumber: claim.number }
+      return { term: base, base, quantity: 'neutral', preamble: preambleEnd >= 0 && offset < preambleEnd, claimTitle: false, offset, claimNumber: claim.number }
     }
     offset = sourceText.indexOf(base, offset + base.length)
   }
@@ -274,7 +275,7 @@ export function analyzeClaimAntecedentBasis(text: string): ClaimAntecedentAnalys
         // in its parent claim's preamble. Warn only when the current claim
         // itself introduces the term solely in its own preamble and later
         // relies on that wording in the limitation body.
-        else if (allSources.every((source) => source.preamble) && allSources.some((source) => source.claimNumber === claim.number)) kind = 'preamble-only'
+        else if (allSources.every((source) => source.preamble) && allSources.some((source) => source.claimNumber === claim.number) && !allSources.some((source) => source.claimTitle)) kind = 'preamble-only'
       }
       if (!kind) continue
       const key = `${claim.number}:${kind}:${reference.base}`
