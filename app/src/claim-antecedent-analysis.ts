@@ -122,8 +122,12 @@ function findKnownBase(raw: string, known: TechnicalTerm[]) {
   return { base: derived, candidates: [] as TechnicalTerm[], displayTerm: derived, exactMatch: false }
 }
 
+function ordinalOf(value: string) {
+  return compact(value).match(ordinalPrefix)?.[0] ?? ''
+}
+
 function extractReferringTerms(text: string, known: TechnicalTerm[]) {
-  const references: Array<{ term: string; base: string; quantity: TechnicalTerm['quantity']; offset: number; known: TechnicalTerm[]; exactMatch: boolean }> = []
+  const references: Array<{ term: string; base: string; quantity: TechnicalTerm['quantity']; offset: number; known: TechnicalTerm[]; exactMatch: boolean; ordinal: string }> = []
   for (const match of text.matchAll(referencePrefix)) {
     if (match.index === undefined) continue
     const raw = text.slice(match.index + match[0].length, match.index + match[0].length + 36)
@@ -136,6 +140,7 @@ function extractReferringTerms(text: string, known: TechnicalTerm[]) {
       offset: match.index,
       known: found.candidates,
       exactMatch: found.exactMatch,
+      ordinal: ordinalOf(raw),
     })
   }
   return references
@@ -262,6 +267,7 @@ export function analyzeClaimAntecedentBasis(text: string): ClaimAntecedentAnalys
         .flatMap((number) => (introducedByClaim.get(number) ?? []).map((term) => ({ ...term, claimNumber: number })))
         .filter((term) => term.base === reference.base
           && (!reference.exactMatch || reference.known.some((candidate) => candidate.term === term.term))
+          && (!reference.ordinal || ordinalOf(term.term) === reference.ordinal)
           && (term.claimNumber !== claim.number || term.offset < reference.offset))
         if (explicit.length) return explicit
         return path.flatMap((number) => {
