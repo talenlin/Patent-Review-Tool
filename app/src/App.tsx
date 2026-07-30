@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowLeft, BookOpenText, Check, ChevronDown, ChevronRight, ChevronUp, FileText, FolderOpen,
-  Cloud, Highlighter, Image, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Plus, Save, Settings2, ShieldCheck, Sparkles, Tag, Trash2, Undo2,
+  Cloud, Highlighter, Image, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Plus, QrCode, Save, Settings2, ShieldCheck, Sparkles, Tag, Trash2, Undo2, X,
 } from 'lucide-react'
 import './App.css'
+import authorQrCodeUrl from './assets/author-qrcode.png?inline'
 import { recognizeCloudFigureLabels } from './cloud-ocr'
 import {
   activeOcrSettings, ocrProviderApiLinks, ocrProviderLabels,
@@ -192,6 +193,7 @@ function App() {
   const [isClaimBasisCollapsed, setIsClaimBasisCollapsed] = useState(false)
   const [activeClaimIssueId, setActiveClaimIssueId] = useState<string | null>(null)
   const [ratings, setRatings] = useState<PatentRatings>(emptyRatings)
+  const [isAuthorQrOpen, setIsAuthorQrOpen] = useState(false)
   const [expandedFigure, setExpandedFigure] = useState<{ source: string; index: number } | null>(null)
   const [expandedFigureScale, setExpandedFigureScale] = useState(1)
   const [notice, setNotice] = useState('')
@@ -901,7 +903,10 @@ function App() {
       : `已生成修订版：${result.revisionPath}${ratingNotice}`)
   }
 
-  if (stage === 'welcome') return <Welcome isOpening={isOpening} notice={notice} onOpen={() => { void openDocument(false) }} desktop={isDesktop} />
+  if (stage === 'welcome') return <>
+    <Welcome isOpening={isOpening} notice={notice} onOpen={() => { void openDocument(false) }} onFollowAuthor={() => setIsAuthorQrOpen(true)} desktop={isDesktop} />
+    {isAuthorQrOpen && <AuthorQrDialog onClose={() => setIsAuthorQrOpen(false)} />}
+  </>
 
   if (stage === 'structure' && file) {
     return <StructureConfirm file={file} sections={sections} detectedCount={detectedCount} onBack={() => setStage('welcome')} onUpdate={updateSectionStart} onConfirm={() => setStage('workspace')} />
@@ -916,7 +921,7 @@ function App() {
   return (
     <main className="app-shell">
       <header className="app-header">
-        <div className="brand"><span className="brand-mark">阅</span><span>专利阅研</span></div>
+        <BrandWithAuthor onFollowAuthor={() => setIsAuthorQrOpen(true)} />
         <div className="document-title"><FileText size={16} /><span>{file.name}</span><span className="analysis-pill"><Sparkles size={13} /> 本地分析就绪</span></div>
         <div className="header-actions"><button type="button" className="header-option-button" onClick={openOcrSettings} title="设置 OCR 识别方式" aria-label={`OCR 设置，当前为${ocrDisplayName}`}><Cloud size={17} /><span>{ocrDisplayName}</span></button><button type="button" className="header-icon-button" onClick={() => { void openDocument(true) }} disabled={isOpening} title="打开新文档" aria-label="打开新文档"><FolderOpen size={18} /></button><button className="quiet-button" onClick={() => setStage('structure')}>文档结构</button><button className="primary-button" onClick={saveRevision}><Save size={16} /> 保存修订版</button></div>
       </header>
@@ -1043,6 +1048,7 @@ function App() {
           </div>
         </section>
       </div>}
+      {isAuthorQrOpen && <AuthorQrDialog onClose={() => setIsAuthorQrOpen(false)} />}
     </main>
   )
 }
@@ -1070,8 +1076,34 @@ function PdfPageView({ page, selectable, selectionRects = [] }: { page: PdfPageD
   </section>
 }
 
-function Welcome({ isOpening, notice, onOpen, desktop }: { isOpening: boolean; notice: string; onOpen: () => void; desktop: boolean }) {
-  return <main className="welcome-screen"><div className="welcome-top"><div className="brand"><span className="brand-mark">阅</span><span>专利阅研</span></div><span>Windows 本地专利阅读工具</span></div><section className="welcome-card"><div className="hero-icon"><BookOpenText size={30} /></div><span className="eyebrow">中文专利 · 本地优先</span><h1>从一份文件，读懂一项专利</h1><p>先确认说明书摘要、权利要求书、说明书和附图的位置，再开始图文联动阅读与专业批注。</p><button className="open-button" onClick={onOpen} disabled={isOpening || !desktop}><FolderOpen size={19} />{isOpening ? '正在读取文件…' : '打开 DOCX 或 PDF'}</button>{!desktop && <p className="desktop-hint">请通过桌面应用运行此工具后打开本地文件。</p>}{notice && <div className="welcome-notice">{notice}</div>}</section><div className="welcome-features"><span><Check size={16} /> 内容仅在本机处理</span><span><Check size={16} /> 原文件不会被覆盖</span><span><Check size={16} /> 生成可交付修订版</span></div></main>
+function BrandWithAuthor({ onFollowAuthor }: { onFollowAuthor: () => void }) {
+  return <div className="brand-with-follow">
+    <div className="brand"><span className="brand-mark">阅</span><span>专利阅研</span></div>
+    <button type="button" className="follow-author-button" onClick={onFollowAuthor}><QrCode size={14} /> 关注作者</button>
+  </div>
+}
+
+function AuthorQrDialog({ onClose }: { onClose: () => void }) {
+  return <div className="author-qr-backdrop" onMouseDown={onClose}>
+    <section className="author-qr-dialog" role="dialog" aria-modal="true" aria-labelledby="author-qr-title" onMouseDown={(event) => event.stopPropagation()}>
+      <button type="button" onClick={onClose} aria-label="关闭关注作者弹窗"><X size={18} /></button>
+      <span className="eyebrow">关注作者</span>
+      <h2 id="author-qr-title">扫码关注，获取更新</h2>
+      <img src={authorQrCodeUrl} alt="关注作者公众号二维码" />
+      <p>使用微信扫描二维码，关注作者后可及时了解版本更新与使用说明。</p>
+    </section>
+  </div>
+}
+
+function Welcome({ isOpening, notice, onOpen, onFollowAuthor, desktop }: { isOpening: boolean; notice: string; onOpen: () => void; onFollowAuthor: () => void; desktop: boolean }) {
+  return <main className="welcome-screen">
+    <div className="welcome-top">
+      <BrandWithAuthor onFollowAuthor={onFollowAuthor} />
+      <span>Windows 本地专利阅读工具</span>
+    </div>
+    <section className="welcome-card"><div className="hero-icon"><BookOpenText size={30} /></div><span className="eyebrow">中文专利 · 本地优先</span><h1>从一份文件，读懂一项专利</h1><p>先确认说明书摘要、权利要求书、说明书和附图的位置，再开始图文联动阅读与专业批注。</p><button className="open-button" onClick={onOpen} disabled={isOpening || !desktop}><FolderOpen size={19} />{isOpening ? '正在读取文件…' : '打开 DOCX 或 PDF'}</button>{!desktop && <p className="desktop-hint">请通过桌面应用运行此工具后打开本地文件。</p>}{notice && <div className="welcome-notice">{notice}</div>}</section>
+    <div className="welcome-features"><span><Check size={16} /> 内容仅在本机处理</span><span><Check size={16} /> 原文件不会被覆盖</span><span><Check size={16} /> 生成可交付修订版</span></div>
+  </main>
 }
 
 function StructureConfirm({ file, sections, detectedCount, onBack, onUpdate, onConfirm }: { file: LoadedFile; sections: PatentSection[]; detectedCount: number; onBack: () => void; onUpdate: (key: SectionKey, value: string) => void; onConfirm: () => void }) {
