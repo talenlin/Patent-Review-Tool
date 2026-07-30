@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowLeft, BookOpenText, Check, ChevronDown, ChevronRight, ChevronUp, FileText, FolderOpen,
-  Cloud, Highlighter, Image, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Plus, Save, Settings2, ShieldCheck, Sparkles, Tag, Trash2, Undo2,
+  Cloud, Highlighter, Image, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Plus, QrCode, Save, Settings2, ShieldCheck, Sparkles, Tag, Trash2, Undo2, X,
 } from 'lucide-react'
 import './App.css'
+import authorQrCodeUrl from './assets/author-qrcode.png?inline'
 import { recognizeCloudFigureLabels } from './cloud-ocr'
 import {
   activeOcrSettings, ocrProviderApiLinks, ocrProviderLabels,
@@ -18,6 +19,9 @@ import {
 import { parsePdf, type PdfPageData } from './pdf-analysis'
 import { findDocxSectionTarget, scrollTargetWithin } from './section-navigation'
 import { analyzeClaimAntecedentBasis, type ClaimIssue } from './claim-antecedent-analysis'
+import LlmReviewDialog, { type LlmRunMetadata } from './LlmReviewDialog'
+import { type LlmReviewFinding } from './llm-review'
+import { reviewRulebook } from './review-rulebook'
 
 type LoadedFile = {
   path: string
@@ -158,6 +162,47 @@ function blocksForClaim(root: HTMLElement, claimNumber: number) {
   return collected
 }
 
+function compactQuote(value: string) {
+  return value.replace(/\s+/g, '')
+}
+
+function pdfAnchorForQuote(pages: PdfPageData[], quote: string): PatentSelectionAnchor | null {
+  const target = compactQuote(quote)
+  if (!target) return null
+  for (const page of pages) {
+    let cursor = 0
+    const spans = page.textItems.map((item) => {
+      const text = compactQuote(item.text)
+      const span = { item, start: cursor, end: cursor + text.length }
+      cursor += text.length
+      return span
+    })
+    const pageText = spans.map(({ item }) => compactQuote(item.text)).join('')
+    const start = pageText.indexOf(target)
+    if (start < 0) continue
+    const end = start + target.length
+    const rects = spans
+      .filter((span) => span.end > start && span.start < end)
+      .map(({ item }) => ({
+        pageNumber: page.pageNumber,
+        left: item.left / page.width,
+        top: item.top / page.height,
+        width: item.width / page.width,
+        height: item.height / page.height,
+      }))
+    if (rects.length) {
+      return {
+        startParagraphText: '',
+        startOffset: 0,
+        endParagraphText: '',
+        endOffset: 0,
+        pdfRects: rects,
+      }
+    }
+  }
+  return null
+}
+
 function App() {
   const [file, setFile] = useState<LoadedFile | null>(null)
   const [stage, setStage] = useState<'welcome' | 'structure' | 'workspace'>('welcome')
@@ -192,6 +237,10 @@ function App() {
   const [isClaimBasisCollapsed, setIsClaimBasisCollapsed] = useState(false)
   const [activeClaimIssueId, setActiveClaimIssueId] = useState<string | null>(null)
   const [ratings, setRatings] = useState<PatentRatings>(emptyRatings)
+  const [isLlmReviewOpen, setIsLlmReviewOpen] = useState(false)
+  const [isAuthorQrOpen, setIsAuthorQrOpen] = useState(false)
+  const [llmFindings, setLlmFindings] = useState<LlmReviewFinding[]>([])
+  const [llmRunMetadata, setLlmRunMetadata] = useState<LlmRunMetadata | null>(null)
   const [expandedFigure, setExpandedFigure] = useState<{ source: string; index: number } | null>(null)
   const [expandedFigureScale, setExpandedFigureScale] = useState(1)
   const [notice, setNotice] = useState('')
@@ -690,6 +739,9 @@ function App() {
       setMode('reading')
       setAnnotations([])
       setRatings({ ...emptyRatings })
+      setLlmFindings([])
+      setLlmRunMetadata(null)
+      setIsLlmReviewOpen(false)
       setAnnotation((current) => ({ ...current, body: '' }))
       setSelectedText(null)
       setSelectionAnchor(null)
@@ -889,19 +941,69 @@ function App() {
         selectionAnchor: null,
       })
     }
+    const acceptedLlmFindings = llmFindings.filter((finding) => finding.accepted)
+    acceptedLlmFindings.forEach((finding) => {
+      const sources = finding.sources
+        .map((source) => `${source.title}${source.url ? `：${source.url}` : ''}`)
+        .join('\n')
+      payload.push({
+        type: 'LLM辅助审查',
+        severity: finding.severity,
+        status: '已采纳',
+        author: annotationAuthor.trim() || '专利阅研',
+        body: [
+          `【${finding.title}｜${finding.evidenceLevel}】`,
+          finding.analysis,
+          `建议：${finding.recommendation}`,
+          sources ? `来源：\n${sources}` : '',
+          '提示：本意见由LLM辅助生成，不构成法律意见。',
+        ].filter(Boolean).join('\n'),
+        location: finding.location,
+        selectedText: finding.quote || null,
+        selectionAnchor: file.extension === 'pdf' ? pdfAnchorForQuote(file.pdfPages, finding.quote) : null,
+      })
+    })
+    const llmReport: PatentLlmReviewReportPayload | null = llmRunMetadata && llmFindings.length ? {
+      technicalField: llmRunMetadata.technicalField,
+      rulebookVersion: reviewRulebook.metadata.version,
+      rulebookVerifiedAt: reviewRulebook.metadata.lastVerifiedAt,
+      provider: llmRunMetadata.provider,
+      model: llmRunMetadata.model,
+      generatedAt: llmRunMetadata.generatedAt,
+      findings: llmFindings.map((finding) => ({
+        module: finding.module,
+        severity: finding.severity,
+        evidenceLevel: finding.evidenceLevel,
+        title: finding.title,
+        location: finding.location,
+        quote: finding.quote,
+        analysis: finding.analysis,
+        recommendation: finding.recommendation,
+        sources: finding.sources.map((source) => `${source.title}${source.url ? `：${source.url}` : ''}`).join('\n'),
+        accepted: finding.accepted,
+      })),
+    } : null
     const result = await window.patentReader.saveRevision(file.path, payload, {
       technicalUnderstanding: ratings.technicalUnderstanding,
       communication: ratings.communication,
       patentQuality: ratings.patentQuality,
-    })
-    const details = [annotations.length ? `${annotations.length} 条批注` : '', ratingLines.length ? '整体评级' : ''].filter(Boolean).join('及')
+    }, llmReport)
+    const details = [
+      annotations.length ? `${annotations.length} 条人工批注` : '',
+      acceptedLlmFindings.length ? `${acceptedLlmFindings.length} 条LLM采纳意见` : '',
+      ratingLines.length ? '整体评级' : '',
+    ].filter(Boolean).join('及')
     const ratingNotice = result.ratingPath ? `；评分表：${result.ratingPath}` : ''
+    const reviewNotice = result.reviewPath ? `；LLM审查报告：${result.reviewPath}` : ''
     setNotice(details
-      ? `已生成修订版并写入${details}：${result.revisionPath}${ratingNotice}`
-      : `已生成修订版：${result.revisionPath}${ratingNotice}`)
+      ? `已生成修订版并写入${details}：${result.revisionPath}${ratingNotice}${reviewNotice}`
+      : `已生成修订版：${result.revisionPath}${ratingNotice}${reviewNotice}`)
   }
 
-  if (stage === 'welcome') return <Welcome isOpening={isOpening} notice={notice} onOpen={() => { void openDocument(false) }} desktop={isDesktop} />
+  if (stage === 'welcome') return <>
+    <Welcome isOpening={isOpening} notice={notice} onOpen={() => { void openDocument(false) }} onFollowAuthor={() => setIsAuthorQrOpen(true)} desktop={isDesktop} />
+    {isAuthorQrOpen && <AuthorQrDialog onClose={() => setIsAuthorQrOpen(false)} />}
+  </>
 
   if (stage === 'structure' && file) {
     return <StructureConfirm file={file} sections={sections} detectedCount={detectedCount} onBack={() => setStage('welcome')} onUpdate={updateSectionStart} onConfirm={() => setStage('workspace')} />
@@ -916,9 +1018,9 @@ function App() {
   return (
     <main className="app-shell">
       <header className="app-header">
-        <div className="brand"><span className="brand-mark">阅</span><span>专利阅研</span></div>
+        <BrandWithAuthor onFollowAuthor={() => setIsAuthorQrOpen(true)} />
         <div className="document-title"><FileText size={16} /><span>{file.name}</span><span className="analysis-pill"><Sparkles size={13} /> 本地分析就绪</span></div>
-        <div className="header-actions"><button type="button" className="header-option-button" onClick={openOcrSettings} title="设置 OCR 识别方式" aria-label={`OCR 设置，当前为${ocrDisplayName}`}><Cloud size={17} /><span>{ocrDisplayName}</span></button><button type="button" className="header-icon-button" onClick={() => { void openDocument(true) }} disabled={isOpening} title="打开新文档" aria-label="打开新文档"><FolderOpen size={18} /></button><button className="quiet-button" onClick={() => setStage('structure')}>文档结构</button><button className="primary-button" onClick={saveRevision}><Save size={16} /> 保存修订版</button></div>
+        <div className="header-actions"><button type="button" className="header-option-button llm-header-button" onClick={() => setIsLlmReviewOpen(true)} title="打开LLM辅助审查"><Sparkles size={17} /><span>LLM 审查{llmFindings.length ? ` · ${llmFindings.length}` : ''}</span></button><button type="button" className="header-option-button" onClick={openOcrSettings} title="设置 OCR 识别方式" aria-label={`OCR 设置，当前为${ocrDisplayName}`}><Cloud size={17} /><span>{ocrDisplayName}</span></button><button type="button" className="header-icon-button" onClick={() => { void openDocument(true) }} disabled={isOpening} title="打开新文档" aria-label="打开新文档"><FolderOpen size={18} /></button><button className="quiet-button" onClick={() => setStage('structure')}>文档结构</button><button className="primary-button" onClick={saveRevision}><Save size={16} /> 保存修订版</button></div>
       </header>
       <div className={`workspace ${isSectionNavCollapsed ? 'nav-collapsed' : ''}`}>
         <nav className={`section-nav ${isSectionNavCollapsed ? 'collapsed' : ''}`} aria-label="文档区段">
@@ -989,6 +1091,11 @@ function App() {
                     : <div className="claim-issue-list">{claimBasisAnalysis.issues.map((issue) => <button key={issue.id} type="button" className={`claim-issue ${activeClaimIssueId === issue.id ? 'active' : ''}`} onClick={() => navigateToClaimIssue(issue)}><div><span className={`claim-issue-severity ${issue.severity}`}>{issue.severity}</span><strong>权 {issue.claimNumber} · {issue.highlightText}</strong></div><p>{issue.message}</p><small>{issue.sources.length ? `引用基础：${issue.sources.map((source) => `权${source.claimNumber}“${source.term}”${source.preamble ? '（前序）' : ''}`).join('；')}` : `已检查 ${issue.paths.length} 条继承路径，未找到首次引入。`}</small></button>)}</div>}
               </>}
           </section>
+          <section className="llm-summary-card">
+            <div><span><Sparkles size={16} /></span><div><strong>LLM 专利辅助审查</strong><small>{llmFindings.length ? `已生成 ${llmFindings.length} 条，采纳 ${llmFindings.filter((finding) => finding.accepted).length} 条` : `规则库 ${reviewRulebook.metadata.version} 已就绪`}</small></div></div>
+            <button type="button" onClick={() => setIsLlmReviewOpen(true)}>{llmFindings.length ? '查看结果' : '开始审查'}</button>
+            <p>辅助审查，不构成法律意见。采纳项保存为批注，完整结果另存为 Excel 报告。</p>
+          </section>
           <div className="annotation-form">
             {selectedText ? <div className="selection-context"><div><span>已锁定原文选区</span><p>“{selectedText}”</p></div><button type="button" onClick={clearLockedSelection}>取消</button></div> : <div className="selection-guide">先在全文窗口选中原文；选区会保留在这里，再填写批注。</div>}
             <div className="form-row"><label>类型<select value={annotation.type} onChange={(event) => setAnnotation({ ...annotation, type: event.target.value })}><option>图文不一致</option><option>术语不一致</option><option>缺乏支持</option><option>表述不清楚</option><option>待核实</option><option>理解笔记</option></select></label><label>程度<select value={annotation.severity} onChange={(event) => setAnnotation({ ...annotation, severity: event.target.value })}><option>提示</option><option>一般</option><option>重要</option><option>阻塞</option></select></label></div>
@@ -1024,6 +1131,16 @@ function App() {
           <footer className="ocr-modal-actions"><button type="button" className="quiet-button" onClick={() => setIsOcrSettingsOpen(false)}>取消</button><button type="button" className="ocr-apply" onClick={applyOcrSettings}>应用识别方式</button></footer>
         </section>
       </div>}
+      {isLlmReviewOpen && <LlmReviewDialog
+        patentText={file.text}
+        findings={llmFindings}
+        onFindingsChange={(nextFindings, metadata) => {
+          setLlmFindings(nextFindings)
+          setLlmRunMetadata(metadata)
+        }}
+        onClose={() => setIsLlmReviewOpen(false)}
+        onNotice={setNotice}
+      />}
       {expandedFigure && <div className="figure-detail-backdrop" onClick={() => setExpandedFigure(null)}>
         <section className="figure-detail-dialog" role="dialog" aria-modal="true" aria-label={`附图 ${expandedFigure.index + 1} 详情`} onClick={(event) => event.stopPropagation()}>
           <header className="figure-detail-header">
@@ -1043,6 +1160,7 @@ function App() {
           </div>
         </section>
       </div>}
+      {isAuthorQrOpen && <AuthorQrDialog onClose={() => setIsAuthorQrOpen(false)} />}
     </main>
   )
 }
@@ -1070,8 +1188,34 @@ function PdfPageView({ page, selectable, selectionRects = [] }: { page: PdfPageD
   </section>
 }
 
-function Welcome({ isOpening, notice, onOpen, desktop }: { isOpening: boolean; notice: string; onOpen: () => void; desktop: boolean }) {
-  return <main className="welcome-screen"><div className="welcome-top"><div className="brand"><span className="brand-mark">阅</span><span>专利阅研</span></div><span>Windows 本地专利阅读工具</span></div><section className="welcome-card"><div className="hero-icon"><BookOpenText size={30} /></div><span className="eyebrow">中文专利 · 本地优先</span><h1>从一份文件，读懂一项专利</h1><p>先确认说明书摘要、权利要求书、说明书和附图的位置，再开始图文联动阅读与专业批注。</p><button className="open-button" onClick={onOpen} disabled={isOpening || !desktop}><FolderOpen size={19} />{isOpening ? '正在读取文件…' : '打开 DOCX 或 PDF'}</button>{!desktop && <p className="desktop-hint">请通过桌面应用运行此工具后打开本地文件。</p>}{notice && <div className="welcome-notice">{notice}</div>}</section><div className="welcome-features"><span><Check size={16} /> 内容仅在本机处理</span><span><Check size={16} /> 原文件不会被覆盖</span><span><Check size={16} /> 生成可交付修订版</span></div></main>
+function BrandWithAuthor({ onFollowAuthor }: { onFollowAuthor: () => void }) {
+  return <div className="brand-with-follow">
+    <div className="brand"><span className="brand-mark">阅</span><span>专利阅研</span></div>
+    <button type="button" className="follow-author-button" onClick={onFollowAuthor}><QrCode size={14} /> 关注作者</button>
+  </div>
+}
+
+function AuthorQrDialog({ onClose }: { onClose: () => void }) {
+  return <div className="author-qr-backdrop" onMouseDown={onClose}>
+    <section className="author-qr-dialog" role="dialog" aria-modal="true" aria-labelledby="author-qr-title" onMouseDown={(event) => event.stopPropagation()}>
+      <button type="button" onClick={onClose} aria-label="关闭关注作者弹窗"><X size={18} /></button>
+      <span className="eyebrow">关注作者</span>
+      <h2 id="author-qr-title">扫码关注，获取更新</h2>
+      <img src={authorQrCodeUrl} alt="关注作者公众号二维码" />
+      <p>使用微信扫描二维码，关注作者后可及时了解版本更新与使用说明。</p>
+    </section>
+  </div>
+}
+
+function Welcome({ isOpening, notice, onOpen, onFollowAuthor, desktop }: { isOpening: boolean; notice: string; onOpen: () => void; onFollowAuthor: () => void; desktop: boolean }) {
+  return <main className="welcome-screen">
+    <div className="welcome-top">
+      <BrandWithAuthor onFollowAuthor={onFollowAuthor} />
+      <span>Windows 本地专利阅读工具</span>
+    </div>
+    <section className="welcome-card"><div className="hero-icon"><BookOpenText size={30} /></div><span className="eyebrow">中文专利 · 本地优先</span><h1>从一份文件，读懂一项专利</h1><p>先确认说明书摘要、权利要求书、说明书和附图的位置，再开始图文联动阅读与专业批注。</p><button className="open-button" onClick={onOpen} disabled={isOpening || !desktop}><FolderOpen size={19} />{isOpening ? '正在读取文件…' : '打开 DOCX 或 PDF'}</button>{!desktop && <p className="desktop-hint">请通过桌面应用运行此工具后打开本地文件。</p>}{notice && <div className="welcome-notice">{notice}</div>}</section>
+    <div className="welcome-features"><span><Check size={16} /> 内容仅在本机处理</span><span><Check size={16} /> 原文件不会被覆盖</span><span><Check size={16} /> 生成可交付修订版</span></div>
+  </main>
 }
 
 function StructureConfirm({ file, sections, detectedCount, onBack, onUpdate, onConfirm }: { file: LoadedFile; sections: PatentSection[]; detectedCount: number; onBack: () => void; onUpdate: (key: SectionKey, value: string) => void; onConfirm: () => void }) {

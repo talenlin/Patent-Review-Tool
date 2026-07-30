@@ -2,6 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use lopdf::{dictionary, Document, Object, ObjectId, StringFormat};
 use rfd::FileDialog;
 use reqwest::blocking::{multipart, Client, Response};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rust_xlsxwriter::{Format, Workbook};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -75,11 +76,177 @@ struct RatingPayload {
     patent_quality: String,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LlmReviewFindingPayload {
+    module: String,
+    severity: String,
+    evidence_level: String,
+    title: String,
+    location: String,
+    quote: String,
+    analysis: String,
+    recommendation: String,
+    sources: String,
+    accepted: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LlmReviewReportPayload {
+    technical_field: String,
+    rulebook_version: String,
+    rulebook_verified_at: String,
+    provider: String,
+    model: String,
+    generated_at: String,
+    findings: Vec<LlmReviewFindingPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmCompletionPayload {
+    provider: String,
+    endpoint: String,
+    api_key: String,
+    model: String,
+    system: String,
+    user: String,
+    purpose: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmCompletionResult {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmModelListPayload {
+    provider: String,
+    endpoint: String,
+    api_key: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmModelListResult {
+    models: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmAgentTurnPayload {
+    provider: String,
+    endpoint: String,
+    api_key: String,
+    model: String,
+    purpose: String,
+    messages: Vec<Value>,
+    tools: Vec<McpToolPayload>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmAgentToolCallResult {
+    id: String,
+    name: String,
+    arguments: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmAgentTurnResult {
+    content: String,
+    assistant_message: Value,
+    tool_calls: Vec<LlmAgentToolCallResult>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpListToolsPayload {
+    endpoint: String,
+    api_key: String,
+    #[serde(default)]
+    headers_json: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct McpToolPayload {
+    name: String,
+    description: String,
+    input_schema: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpListToolsResult {
+    tools: Vec<McpToolPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetrievalListToolsPayload {
+    provider: String,
+    endpoint: String,
+    api_key: String,
+    #[serde(rename = "clientSecret")]
+    _client_secret: String,
+    #[serde(default)]
+    headers_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetrievalToolCallPayload {
+    provider: String,
+    endpoint: String,
+    api_key: String,
+    client_secret: String,
+    #[serde(default)]
+    headers_json: String,
+    search_engine: String,
+    count: usize,
+    tool_name: String,
+    arguments: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetrievalToolCallResult {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetrievalExecutePayload {
+    provider: String,
+    endpoint: String,
+    api_key: String,
+    client_secret: String,
+    search_engine: String,
+    count: usize,
+    tool_name: String,
+    argument_template: String,
+    #[serde(default)]
+    headers_json: String,
+    queries: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetrievalExecuteResult {
+    content: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveRevisionResult {
     revision_path: String,
     rating_path: Option<String>,
+    review_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -966,6 +1133,27 @@ fn rating_workbook_path(revision: &Path) -> PathBuf {
     revision.with_file_name(format!("{stem}-评分表.xlsx"))
 }
 
+fn available_xlsx_sibling_path(original: &Path, suffix: &str) -> PathBuf {
+    let directory = original.parent().unwrap_or_else(|| Path::new("."));
+    let stem = original.file_stem().and_then(|value| value.to_str()).unwrap_or("专利文件");
+    let first = directory.join(format!("{stem}{suffix}.xlsx"));
+    if !first.exists() {
+        return first;
+    }
+    let mut index = 2;
+    loop {
+        let candidate = directory.join(format!("{stem}{suffix}（{index}）.xlsx"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn review_workbook_path(original: &Path) -> PathBuf {
+    available_xlsx_sibling_path(original, "-LLM审查报告")
+}
+
 fn write_rating_workbook(
     destination: &Path,
     case_name: &str,
@@ -987,6 +1175,94 @@ fn write_rating_workbook(
     worksheet.write_with_format(1, 2, &ratings.communication, &default_format).map_err(|error| format!("无法写入评分表：{error}"))?;
     worksheet.write_with_format(1, 3, &ratings.patent_quality, &default_format).map_err(|error| format!("无法写入评分表：{error}"))?;
     workbook.save(destination).map_err(|error| format!("无法保存评分表：{error}"))
+}
+
+fn write_review_workbook(
+    destination: &Path,
+    case_name: &str,
+    ratings: Option<&RatingPayload>,
+    report: &LlmReviewReportPayload,
+) -> Result<(), String> {
+    let mut workbook = Workbook::new();
+    let default_format = Format::new().set_font_name("微软雅黑").set_font_size(10);
+    let header_format = Format::new()
+        .set_font_name("微软雅黑")
+        .set_font_size(10)
+        .set_bold()
+        .set_background_color("#DDEFEA");
+    let wrap_format = Format::new()
+        .set_font_name("微软雅黑")
+        .set_font_size(10)
+        .set_text_wrap();
+    workbook.set_default_format(&default_format, 15, 72)
+        .map_err(|error| format!("无法设置审查报告格式：{error}"))?;
+
+    let findings = workbook.add_worksheet();
+    findings.set_name("审查结论").map_err(|error| format!("无法创建审查报告工作表：{error}"))?;
+    let headers = [
+        "序号", "模块", "严重程度", "证据等级", "标题", "原文位置", "原文摘录",
+        "问题分析", "修改/核验建议", "来源", "用户采纳",
+    ];
+    let widths = [7.0, 20.0, 10.0, 16.0, 26.0, 22.0, 42.0, 52.0, 48.0, 42.0, 10.0];
+    for (column, (header, width)) in headers.iter().zip(widths).enumerate() {
+        findings.set_column_width(column as u16, width)
+            .map_err(|error| format!("无法设置审查报告列宽：{error}"))?;
+        findings.write_with_format(0, column as u16, *header, &header_format)
+            .map_err(|error| format!("无法写入审查报告表头：{error}"))?;
+    }
+    for (index, finding) in report.findings.iter().enumerate() {
+        let row = (index + 1) as u32;
+        let values = [
+            (index + 1).to_string(),
+            finding.module.clone(),
+            finding.severity.clone(),
+            finding.evidence_level.clone(),
+            finding.title.clone(),
+            finding.location.clone(),
+            finding.quote.clone(),
+            finding.analysis.clone(),
+            finding.recommendation.clone(),
+            finding.sources.clone(),
+            if finding.accepted { "已采纳".to_string() } else { "未采纳".to_string() },
+        ];
+        for (column, value) in values.iter().enumerate() {
+            findings.write_with_format(row, column as u16, value, &wrap_format)
+                .map_err(|error| format!("无法写入审查报告：{error}"))?;
+        }
+    }
+    findings.set_freeze_panes(1, 0)
+        .map_err(|error| format!("无法设置审查报告冻结窗格：{error}"))?;
+
+    let summary = workbook.add_worksheet();
+    summary.set_name("审查信息").map_err(|error| format!("无法创建审查信息工作表：{error}"))?;
+    summary.set_column_width(0, 22).map_err(|error| format!("无法设置审查信息列宽：{error}"))?;
+    summary.set_column_width(1, 70).map_err(|error| format!("无法设置审查信息列宽：{error}"))?;
+    let rating_values = ratings.cloned().unwrap_or(RatingPayload {
+        technical_understanding: String::new(),
+        communication: String::new(),
+        patent_quality: String::new(),
+    });
+    let metadata = [
+        ("案件", case_name.to_string()),
+        ("技术领域", report.technical_field.clone()),
+        ("LLM服务商", report.provider.clone()),
+        ("模型", report.model.clone()),
+        ("规则库版本", report.rulebook_version.clone()),
+        ("规则库核验日期", report.rulebook_verified_at.clone()),
+        ("生成时间", report.generated_at.clone()),
+        ("技术理解评级", rating_values.technical_understanding),
+        ("沟通评级", rating_values.communication),
+        ("专利质量评级", rating_values.patent_quality),
+        ("免责声明", "本报告仅用于辅助审核，不构成法律意见；结论应由具备资质的专利代理师或律师结合案情复核。".to_string()),
+    ];
+    for (row, (label, value)) in metadata.iter().enumerate() {
+        summary.write_with_format(row as u32, 0, *label, &header_format)
+            .map_err(|error| format!("无法写入审查信息：{error}"))?;
+        summary.write_with_format(row as u32, 1, value, &wrap_format)
+            .map_err(|error| format!("无法写入审查信息：{error}"))?;
+    }
+
+    workbook.save(destination).map_err(|error| format!("无法保存LLM审查报告：{error}"))
 }
 
 fn cloud_ocr_client() -> Result<Client, String> {
@@ -1367,11 +1643,1003 @@ fn open_document() -> Result<Option<OpenedDocument>, String> {
     }))
 }
 
+fn opened_document(path: &Path) -> Result<OpenedDocument, String> {
+    let bytes = fs::read(path).map_err(|error| format!("无法读取对比文件：{error}"))?;
+    let name = path.file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "无法读取对比文件名".to_string())?
+        .to_owned();
+    let extension = path.extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    Ok(OpenedDocument {
+        path: path.to_string_lossy().into_owned(),
+        name,
+        extension,
+        base64: STANDARD.encode(bytes),
+    })
+}
+
+#[tauri::command]
+fn open_comparison_documents() -> Result<Vec<OpenedDocument>, String> {
+    let selected = FileDialog::new()
+        .set_title("选择对比文件")
+        .add_filter("对比文件", &["docx", "pdf"])
+        .pick_files()
+        .unwrap_or_default();
+    selected.iter().map(|path| opened_document(path)).collect()
+}
+
+fn llm_completion_blocking(payload: LlmCompletionPayload) -> Result<LlmCompletionResult, String> {
+    let endpoint = validated_external_url(&payload.endpoint)?;
+    if payload.api_key.trim().is_empty() {
+        return Err("请先填写LLM或检索服务的API Key。".to_string());
+    }
+    if payload.model.trim().is_empty() {
+        return Err("请先填写模型或工具名称。".to_string());
+    }
+    if payload.system.len() > 120_000 || payload.user.len() > 600_000 {
+        return Err("本次审查内容超过安全传输上限，请缩小审查范围。".to_string());
+    }
+    let client = Client::builder()
+        .timeout(Duration::from_secs(240))
+        .build()
+        .map_err(|error| format!("无法初始化LLM请求：{error}"))?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(payload.api_key.trim())
+        .json(&json!({
+            "model": payload.model.trim(),
+            "messages": [
+                { "role": "system", "content": payload.system },
+                { "role": "user", "content": payload.user }
+            ],
+            "stream": false
+        }))
+        .send()
+        .map_err(|error| format!("{}请求失败：{error}", payload.purpose))?;
+    let provider_name = if payload.provider.trim().is_empty() { "LLM" } else { payload.provider.trim() };
+    let body = cloud_response_json(response, provider_name)?;
+    let content = body.pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .or_else(|| body.pointer("/output_text").and_then(Value::as_str))
+        .ok_or_else(|| format!("{provider_name}返回内容中没有可读取的文本。"))?
+        .trim()
+        .to_string();
+    if content.is_empty() {
+        return Err(format!("{provider_name}返回了空结果。"));
+    }
+    Ok(LlmCompletionResult { content })
+}
+
+#[tauri::command]
+async fn llm_completion(payload: LlmCompletionPayload) -> Result<LlmCompletionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || llm_completion_blocking(payload))
+        .await
+        .map_err(|error| format!("LLM后台任务异常结束：{error}"))?
+}
+
+fn parse_agent_tool_calls(message: &Value) -> Result<Vec<LlmAgentToolCallResult>, String> {
+    message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|call| {
+            let id = call.get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let function = call.get("function")
+                .ok_or_else(|| "LLM工具调用缺少function字段。".to_string())?;
+            let name = function.get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if id.is_empty() || name.is_empty() {
+                return Err("LLM工具调用缺少id或工具名称。".to_string());
+            }
+            let arguments = match function.get("arguments") {
+                Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+                    .map_err(|error| format!("LLM为工具{name}生成的参数不是合法JSON：{error}"))?,
+                Some(value) => value.clone(),
+                None => json!({}),
+            };
+            if !arguments.is_object() {
+                return Err(format!("LLM为工具{name}生成的参数必须是JSON对象。"));
+            }
+            Ok(LlmAgentToolCallResult { id, name, arguments })
+        })
+        .collect()
+}
+
+fn llm_agent_turn_blocking(payload: LlmAgentTurnPayload) -> Result<LlmAgentTurnResult, String> {
+    let endpoint = validated_external_url(&payload.endpoint)?;
+    if payload.api_key.trim().is_empty() {
+        return Err("请先填写LLM的API Key。".to_string());
+    }
+    if payload.model.trim().is_empty() {
+        return Err("请先选择支持工具调用的模型。".to_string());
+    }
+    let message_bytes = serde_json::to_vec(&payload.messages)
+        .map_err(|error| format!("无法整理LLM检索会话：{error}"))?;
+    if message_bytes.len() > 1_200_000 {
+        return Err("LLM检索会话超过安全传输上限，请减少工具调用轮次。".to_string());
+    }
+    let tools = payload.tools.iter().map(|tool| {
+        json!({
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+            }
+        })
+    }).collect::<Vec<_>>();
+    let mut request_body = json!({
+        "model": payload.model.trim(),
+        "messages": payload.messages,
+        "stream": false,
+    });
+    if !tools.is_empty() {
+        request_body["tools"] = Value::Array(tools);
+        request_body["tool_choice"] = Value::String("auto".to_string());
+    }
+    let client = Client::builder()
+        .timeout(Duration::from_secs(240))
+        .build()
+        .map_err(|error| format!("无法初始化LLM工具调用请求：{error}"))?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(payload.api_key.trim())
+        .json(&request_body)
+        .send()
+        .map_err(|error| format!("{}请求失败：{error}", payload.purpose))?;
+    let provider_name = if payload.provider.trim().is_empty() { "LLM" } else { payload.provider.trim() };
+    let body = cloud_response_json(response, provider_name)?;
+    let assistant_message = body.pointer("/choices/0/message")
+        .cloned()
+        .ok_or_else(|| format!("{provider_name}没有返回可读取的assistant消息；请确认所选模型支持工具调用。"))?;
+    let content = assistant_message.get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let tool_calls = parse_agent_tool_calls(&assistant_message)?;
+    if content.is_empty() && tool_calls.is_empty() {
+        return Err(format!("{provider_name}既没有返回文本，也没有调用检索工具；请更换支持工具调用的模型。"));
+    }
+    Ok(LlmAgentTurnResult { content, assistant_message, tool_calls })
+}
+
+#[tauri::command]
+async fn llm_agent_turn(payload: LlmAgentTurnPayload) -> Result<LlmAgentTurnResult, String> {
+    tauri::async_runtime::spawn_blocking(move || llm_agent_turn_blocking(payload))
+        .await
+        .map_err(|error| format!("LLM工具调用后台任务异常结束：{error}"))?
+}
+
+fn parse_llm_model_ids(body: &Value) -> Vec<String> {
+    let entries = body
+        .get("data")
+        .or_else(|| body.get("models"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut models = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("id")
+                .or_else(|| entry.get("name"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .collect::<Vec<_>>();
+    models.sort_by_key(|value| value.to_ascii_lowercase());
+    models.dedup();
+    models
+}
+
+fn llm_list_models_blocking(payload: LlmModelListPayload) -> Result<LlmModelListResult, String> {
+    let endpoint = validated_external_url(&payload.endpoint)?;
+    if payload.api_key.trim().is_empty() {
+        return Err("请先填写所选服务商的API Key。".to_string());
+    }
+    let provider_name = if payload.provider.trim().is_empty() { "LLM" } else { payload.provider.trim() };
+    let client = Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|error| format!("无法初始化模型列表请求：{error}"))?;
+    let response = client
+        .get(endpoint)
+        .bearer_auth(payload.api_key.trim())
+        .send()
+        .map_err(|error| format!("{provider_name}模型列表请求失败：{error}"))?;
+    let body = cloud_response_json(response, provider_name)?;
+    let models = parse_llm_model_ids(&body);
+    if models.is_empty() {
+        return Err(format!("{provider_name}未返回可用的模型名称；仍可手工填写模型ID。"));
+    }
+    Ok(LlmModelListResult { models })
+}
+
+#[tauri::command]
+async fn llm_list_models(payload: LlmModelListPayload) -> Result<LlmModelListResult, String> {
+    tauri::async_runtime::spawn_blocking(move || llm_list_models_blocking(payload))
+        .await
+        .map_err(|error| format!("模型列表后台任务异常结束：{error}"))?
+}
+
+fn parse_mcp_wire_json(text: &str) -> Result<Value, String> {
+    if let Ok(value) = serde_json::from_str::<Value>(text.trim()) {
+        return Ok(value);
+    }
+    for line in text.lines().rev() {
+        if let Some(data) = line.trim().strip_prefix("data:") {
+            if let Ok(value) = serde_json::from_str::<Value>(data.trim()) {
+                return Ok(value);
+            }
+        }
+    }
+    Err("MCP服务器未返回可解析的JSON或SSE数据。".to_string())
+}
+
+fn parse_mcp_headers(headers_json: &str) -> Result<HeaderMap, String> {
+    if headers_json.trim().is_empty() {
+        return Ok(HeaderMap::new());
+    }
+    let values = serde_json::from_str::<serde_json::Map<String, Value>>(headers_json)
+        .map_err(|error| format!("自定义请求头不是合法JSON对象：{error}"))?;
+    let mut headers = HeaderMap::new();
+    for (name, value) in values {
+        let lower = name.to_ascii_lowercase();
+        if matches!(lower.as_str(), "host" | "content-length" | "connection" | "transfer-encoding") {
+            return Err(format!("自定义请求头不允许设置{name}。"));
+        }
+        let text = value
+            .as_str()
+            .ok_or_else(|| format!("自定义请求头{name}的值必须是字符串。"))?;
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("自定义请求头名称{name}无效。"))?;
+        let header_value = HeaderValue::from_str(text)
+            .map_err(|_| format!("自定义请求头{name}的值无效。"))?;
+        headers.insert(header_name, header_value);
+    }
+    Ok(headers)
+}
+
+fn mcp_request(
+    client: &Client,
+    endpoint: &str,
+    api_key: &str,
+    custom_headers: &HeaderMap,
+    session_id: Option<&str>,
+    body: &Value,
+) -> reqwest::blocking::RequestBuilder {
+    let mut request = client
+        .post(endpoint)
+        .header("Accept", "application/json, text/event-stream")
+        .header("Content-Type", "application/json")
+        .header("MCP-Protocol-Version", "2025-03-26")
+        .json(body);
+    if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key.trim());
+    }
+    if !custom_headers.is_empty() {
+        request = request.headers(custom_headers.clone());
+    }
+    if let Some(session_id) = session_id.filter(|value| !value.is_empty()) {
+        request = request.header("Mcp-Session-Id", session_id);
+    }
+    request
+}
+
+fn mcp_post(
+    client: &Client,
+    endpoint: &str,
+    api_key: &str,
+    custom_headers: &HeaderMap,
+    session_id: Option<&str>,
+    body: &Value,
+) -> Result<(Value, Option<String>), String> {
+    let response = mcp_request(client, endpoint, api_key, custom_headers, session_id, body)
+        .send()
+        .map_err(|error| format!("MCP请求失败：{error}"))?;
+    let status = response.status();
+    let next_session_id = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+        .or_else(|| session_id.map(ToOwned::to_owned));
+    let text = response
+        .text()
+        .map_err(|error| format!("无法读取MCP响应：{error}"))?;
+    if !status.is_success() {
+        return Err(format!("MCP服务器返回HTTP {}：{}", status.as_u16(), text.chars().take(600).collect::<String>()));
+    }
+    let value = parse_mcp_wire_json(&text)?;
+    if let Some(error) = value.get("error") {
+        return Err(format!("MCP服务器返回错误：{}", error));
+    }
+    Ok((value, next_session_id))
+}
+
+fn mcp_post_notification(
+    client: &Client,
+    endpoint: &str,
+    api_key: &str,
+    custom_headers: &HeaderMap,
+    session_id: Option<&str>,
+    body: &Value,
+) -> Result<(), String> {
+    let response = mcp_request(client, endpoint, api_key, custom_headers, session_id, body)
+        .send()
+        .map_err(|error| format!("MCP初始化确认失败：{error}"))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("MCP初始化确认返回HTTP {}。", response.status().as_u16()))
+    }
+}
+
+fn parse_mcp_tools(value: &Value) -> Vec<McpToolPayload> {
+    value
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            let name = tool.get("name").and_then(Value::as_str)?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some(McpToolPayload {
+                name: name.to_string(),
+                description: tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                input_schema: tool
+                    .get("inputSchema")
+                    .or_else(|| tool.get("input_schema"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
+            })
+        })
+        .collect()
+}
+
+fn connect_mcp(
+    endpoint: &str,
+    api_key: &str,
+    headers_json: &str,
+) -> Result<(Client, Option<String>, Vec<McpToolPayload>), String> {
+    let endpoint = validated_external_url(endpoint)?;
+    let custom_headers = parse_mcp_headers(headers_json)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| format!("无法初始化MCP连接：{error}"))?;
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": { "name": "patent-reader", "version": "1.1.0" }
+        }
+    });
+    let (_, session_id) = mcp_post(&client, &endpoint, api_key, &custom_headers, None, &initialize)?;
+    mcp_post_notification(
+        &client,
+        &endpoint,
+        api_key,
+        &custom_headers,
+        session_id.as_deref(),
+        &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    )?;
+    let (tools_value, session_id) = mcp_post(
+        &client,
+        &endpoint,
+        api_key,
+        &custom_headers,
+        session_id.as_deref(),
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+    )?;
+    let tools = parse_mcp_tools(&tools_value);
+    if tools.is_empty() {
+        return Err("MCP服务器连接成功，但没有返回可调用工具。".to_string());
+    }
+    Ok((client, session_id, tools))
+}
+
+fn mcp_list_tools_blocking(payload: McpListToolsPayload) -> Result<McpListToolsResult, String> {
+    let (_, _, tools) = connect_mcp(&payload.endpoint, &payload.api_key, &payload.headers_json)?;
+    Ok(McpListToolsResult { tools })
+}
+
+#[tauri::command]
+async fn mcp_list_tools(payload: McpListToolsPayload) -> Result<McpListToolsResult, String> {
+    tauri::async_runtime::spawn_blocking(move || mcp_list_tools_blocking(payload))
+        .await
+        .map_err(|error| format!("MCP工具发现任务异常结束：{error}"))?
+}
+
+fn research_tool(name: &str, description: &str, input_schema: Value) -> McpToolPayload {
+    McpToolPayload {
+        name: name.to_string(),
+        description: description.to_string(),
+        input_schema,
+    }
+}
+
+fn zhipu_research_tools() -> Vec<McpToolPayload> {
+    vec![research_tool(
+        "web_search",
+        "使用智谱Web Search检索网页、论文、标准、专利线索和权威技术资料。可根据前次结果改写query继续检索。",
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "检索词，不超过70个字符" },
+                "count": { "type": "integer", "minimum": 1, "maximum": 50 }
+            },
+            "required": ["query"]
+        }),
+    )]
+}
+
+fn epo_research_tools() -> Vec<McpToolPayload> {
+    let reference_properties = json!({
+        "type": { "type": "string", "enum": ["publication", "application", "priority"], "default": "publication" },
+        "format": { "type": "string", "enum": ["epodoc", "docdb"], "default": "epodoc" },
+        "number": { "type": "string", "description": "专利文献号，例如EP1000000或US20240001234A1" }
+    });
+    vec![
+        research_tool(
+            "ops_search",
+            "使用EPO OPS CQL检索全球专利。字段包括ti、ab、pa、in、pd、num、cl和cpc；支持AND、OR、NOT。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "CQL检索式" },
+                    "range": { "type": "string", "default": "1-25", "description": "结果范围，例如1-25" }
+                },
+                "required": ["query"]
+            }),
+        ),
+        research_tool(
+            "ops_get_biblio",
+            "按文献号获取完整书目数据，包括标题、申请人、发明人、分类号、优先权和引用文献。",
+            json!({ "type": "object", "properties": reference_properties.clone(), "required": ["number"] }),
+        ),
+        research_tool(
+            "ops_get_abstract",
+            "按文献号获取专利摘要。用于核查候选文献是否值得继续读取全文。",
+            json!({ "type": "object", "properties": reference_properties.clone(), "required": ["number"] }),
+        ),
+        research_tool(
+            "ops_get_fulltext",
+            "按文献号获取专利说明书或权利要求全文。part应为description或claims。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "type": { "type": "string", "enum": ["publication", "application", "priority"], "default": "publication" },
+                    "format": { "type": "string", "enum": ["epodoc", "docdb"], "default": "epodoc" },
+                    "number": { "type": "string" },
+                    "part": { "type": "string", "enum": ["description", "claims"], "default": "claims" }
+                },
+                "required": ["number", "part"]
+            }),
+        ),
+        research_tool(
+            "ops_get_family",
+            "获取INPADOC扩展专利同族，可附带biblio或legal数据。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "type": { "type": "string", "enum": ["publication", "application", "priority"], "default": "publication" },
+                    "format": { "type": "string", "enum": ["epodoc", "docdb"], "default": "epodoc" },
+                    "number": { "type": "string" },
+                    "constituents": { "type": "string", "enum": ["", "biblio", "legal"], "default": "" }
+                },
+                "required": ["number"]
+            }),
+        ),
+        research_tool(
+            "ops_get_equivalents",
+            "获取DOCDB简单同族，用于寻找同一发明的直接等效公开文本。",
+            json!({ "type": "object", "properties": reference_properties, "required": ["number"] }),
+        ),
+        research_tool(
+            "ops_cpc_search",
+            "按关键词搜索CPC分类定义，用于确定下一轮专利检索的分类号。",
+            json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }),
+        ),
+        research_tool(
+            "ops_convert_number",
+            "在original、docdb和epodoc之间转换专利号格式。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "type": { "type": "string", "enum": ["publication", "application", "priority"], "default": "publication" },
+                    "input_format": { "type": "string", "enum": ["original", "docdb", "epodoc"], "default": "original" },
+                    "number": { "type": "string" },
+                    "output_format": { "type": "string", "enum": ["original", "docdb", "epodoc"], "default": "epodoc" }
+                },
+                "required": ["number"]
+            }),
+        ),
+    ]
+}
+
+fn looks_mutating_mcp_tool(tool: &McpToolPayload) -> bool {
+    let value = format!("{} {}", tool.name, tool.description).to_ascii_lowercase();
+    [
+        "delete", "remove", "create", "update", "write", "upload", "publish",
+        "submit", "modify", "edit", "删除", "新建", "创建", "更新", "写入", "上传", "提交",
+    ].iter().any(|keyword| value.contains(keyword))
+}
+
+fn retrieval_list_tools_blocking(payload: RetrievalListToolsPayload) -> Result<McpListToolsResult, String> {
+    let tools = match payload.provider.as_str() {
+        "zhipu" => zhipu_research_tools(),
+        "epo-ops" => epo_research_tools(),
+        "patsnap-mcp" | "custom-mcp" => {
+            let (_, _, tools) = connect_mcp(&payload.endpoint, &payload.api_key, &payload.headers_json)?;
+            tools.into_iter().filter(|tool| !looks_mutating_mcp_tool(tool)).collect()
+        }
+        _ => return Err("不支持的检索工具提供方。".to_string()),
+    };
+    if tools.is_empty() {
+        return Err("当前检索连接没有返回可供LLM调用的只读工具。".to_string());
+    }
+    Ok(McpListToolsResult { tools })
+}
+
+#[tauri::command]
+async fn retrieval_list_tools(payload: RetrievalListToolsPayload) -> Result<McpListToolsResult, String> {
+    tauri::async_runtime::spawn_blocking(move || retrieval_list_tools_blocking(payload))
+        .await
+        .map_err(|error| format!("检索工具发现任务异常结束：{error}"))?
+}
+
+fn argument_string<'a>(arguments: &'a Value, name: &str, fallback: &'a str) -> &'a str {
+    arguments.get(name).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).unwrap_or(fallback)
+}
+
+fn safe_epo_segment(value: &str, field: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')) {
+        return Err(format!("EPO参数{field}包含不允许的字符。"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn epo_authenticated_client(payload: &RetrievalToolCallPayload) -> Result<(Client, String), String> {
+    if payload.api_key.trim().is_empty() || payload.client_secret.trim().is_empty() {
+        return Err("请填写EPO OPS Consumer Key和Consumer Secret。".to_string());
+    }
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| format!("无法初始化EPO OPS连接：{error}"))?;
+    let response = client
+        .post("https://ops.epo.org/3.2/auth/accesstoken")
+        .basic_auth(payload.api_key.trim(), Some(payload.client_secret.trim()))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("grant_type=client_credentials")
+        .send()
+        .map_err(|error| format!("EPO OPS认证失败：{error}"))?;
+    let body = cloud_response_json(response, "EPO OPS认证")?;
+    let token = body.get("access_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "EPO OPS认证响应中没有access_token。".to_string())?
+        .to_string();
+    Ok((client, token))
+}
+
+fn epo_result_text(response: Response, context: &str) -> Result<String, String> {
+    let body = cloud_response_json(response, context)?;
+    let mut content = serde_json::to_string_pretty(&body)
+        .map_err(|error| format!("无法整理{context}结果：{error}"))?;
+    if content.len() > 180_000 {
+        content.truncate(180_000);
+        content.push_str("\n[结果过长，已截断]");
+    }
+    Ok(content)
+}
+
+fn execute_epo_tool(payload: &RetrievalToolCallPayload) -> Result<String, String> {
+    let base_url = validated_external_url(&payload.endpoint)?;
+    let (client, token) = epo_authenticated_client(payload)?;
+    let arguments = &payload.arguments;
+    let tool_name = payload.tool_name.as_str();
+    if tool_name == "ops_search" {
+        let query = argument_string(arguments, "query", "");
+        if query.is_empty() {
+            return Err("ops_search缺少query参数。".to_string());
+        }
+        let range = argument_string(arguments, "range", "1-25");
+        if !range.chars().all(|character| character.is_ascii_digit() || character == '-') {
+            return Err("ops_search的range必须采用1-25格式。".to_string());
+        }
+        let response = client
+            .get(format!("{}/published-data/search", base_url.trim_end_matches('/')))
+            .bearer_auth(&token)
+            .header("Accept", "application/json")
+            .query(&[("q", query), ("Range", range)])
+            .send()
+            .map_err(|error| format!("EPO OPS检索失败：{error}"))?;
+        return epo_result_text(response, "EPO OPS检索");
+    }
+    if tool_name == "ops_cpc_search" {
+        let query = argument_string(arguments, "query", "");
+        if query.is_empty() {
+            return Err("ops_cpc_search缺少query参数。".to_string());
+        }
+        let response = client
+            .get(format!("{}/classification/cpc/search", base_url.trim_end_matches('/')))
+            .bearer_auth(&token)
+            .header("Accept", "application/json")
+            .query(&[("q", query)])
+            .send()
+            .map_err(|error| format!("EPO CPC检索失败：{error}"))?;
+        return epo_result_text(response, "EPO CPC检索");
+    }
+    let reference_type = safe_epo_segment(argument_string(arguments, "type", "publication"), "type")?;
+    let format = safe_epo_segment(argument_string(arguments, "format", "epodoc"), "format")?;
+    let number = safe_epo_segment(argument_string(arguments, "number", ""), "number")?;
+    let path = match tool_name {
+        "ops_get_biblio" => format!("/published-data/{reference_type}/{format}/{number}/biblio"),
+        "ops_get_abstract" => format!("/published-data/{reference_type}/{format}/{number}/abstract"),
+        "ops_get_fulltext" => {
+            let part = safe_epo_segment(argument_string(arguments, "part", "claims"), "part")?;
+            if !matches!(part.as_str(), "description" | "claims") {
+                return Err("ops_get_fulltext的part必须是description或claims。".to_string());
+            }
+            format!("/published-data/{reference_type}/{format}/{number}/{part}")
+        }
+        "ops_get_family" => {
+            let constituents = argument_string(arguments, "constituents", "");
+            let suffix = if matches!(constituents, "biblio" | "legal") { format!("/{constituents}") } else { String::new() };
+            format!("/family/{reference_type}/{format}/{number}{suffix}")
+        }
+        "ops_get_equivalents" => format!("/published-data/{reference_type}/{format}/{number}/equivalents"),
+        "ops_convert_number" => {
+            let input_format = safe_epo_segment(argument_string(arguments, "input_format", "original"), "input_format")?;
+            let output_format = safe_epo_segment(argument_string(arguments, "output_format", "epodoc"), "output_format")?;
+            format!("/number-service/{reference_type}/{input_format}/{number}/{output_format}")
+        }
+        _ => return Err(format!("不支持的EPO检索工具：{tool_name}")),
+    };
+    let response = client
+        .get(format!("{}{}", base_url.trim_end_matches('/'), path))
+        .bearer_auth(&token)
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|error| format!("EPO工具{tool_name}调用失败：{error}"))?;
+    epo_result_text(response, tool_name)
+}
+
+fn execute_zhipu_tool(payload: &RetrievalToolCallPayload) -> Result<String, String> {
+    if payload.tool_name != "web_search" {
+        return Err("智谱检索只提供web_search工具。".to_string());
+    }
+    let query = argument_string(&payload.arguments, "query", "");
+    if query.is_empty() {
+        return Err("web_search缺少query参数。".to_string());
+    }
+    let count = payload.arguments.get("count")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(payload.count)
+        .clamp(1, 50);
+    let endpoint = validated_external_url(&payload.endpoint)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| format!("无法初始化智谱搜索：{error}"))?;
+    let short_query = query.chars().take(70).collect::<String>();
+    let engine = if payload.search_engine.trim().is_empty() { "search_pro" } else { payload.search_engine.trim() };
+    let response = client
+        .post(endpoint)
+        .bearer_auth(payload.api_key.trim())
+        .json(&json!({
+            "search_query": short_query,
+            "search_engine": engine,
+            "search_intent": false,
+            "count": count,
+            "search_recency_filter": "noLimit",
+            "content_size": "high"
+        }))
+        .send()
+        .map_err(|error| format!("智谱搜索请求失败：{error}"))?;
+    epo_result_text(response, "智谱Web Search")
+}
+
+fn execute_mcp_tool(payload: &RetrievalToolCallPayload) -> Result<String, String> {
+    let custom_headers = parse_mcp_headers(&payload.headers_json)?;
+    let (client, session_id, tools) = connect_mcp(&payload.endpoint, &payload.api_key, &payload.headers_json)?;
+    let selected = tools.iter()
+        .find(|tool| tool.name == payload.tool_name)
+        .ok_or_else(|| format!("MCP服务器未提供工具{}。", payload.tool_name))?;
+    if looks_mutating_mcp_tool(selected) {
+        return Err("专利检索代理不允许调用可能修改外部数据的MCP工具。".to_string());
+    }
+    if !payload.arguments.is_object() {
+        return Err("MCP工具参数必须是JSON对象。".to_string());
+    }
+    let (value, _) = mcp_post(
+        &client,
+        &payload.endpoint,
+        &payload.api_key,
+        &custom_headers,
+        session_id.as_deref(),
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "tools/call",
+            "params": { "name": selected.name, "arguments": payload.arguments }
+        }),
+    )?;
+    Ok(mcp_result_text(&value))
+}
+
+fn retrieval_call_tool_blocking(payload: RetrievalToolCallPayload) -> Result<RetrievalToolCallResult, String> {
+    let content = match payload.provider.as_str() {
+        "zhipu" => execute_zhipu_tool(&payload)?,
+        "epo-ops" => execute_epo_tool(&payload)?,
+        "patsnap-mcp" | "custom-mcp" => execute_mcp_tool(&payload)?,
+        _ => return Err("不支持的检索工具提供方。".to_string()),
+    };
+    Ok(RetrievalToolCallResult { content })
+}
+
+#[tauri::command]
+async fn retrieval_call_tool(payload: RetrievalToolCallPayload) -> Result<RetrievalToolCallResult, String> {
+    tauri::async_runtime::spawn_blocking(move || retrieval_call_tool_blocking(payload))
+        .await
+        .map_err(|error| format!("检索工具后台任务异常结束：{error}"))?
+}
+
+fn replace_query_placeholder(value: &mut Value, query: &str) {
+    match value {
+        Value::String(text) => *text = text.replace("{{query}}", query),
+        Value::Array(items) => items.iter_mut().for_each(|item| replace_query_placeholder(item, query)),
+        Value::Object(map) => map.values_mut().for_each(|item| replace_query_placeholder(item, query)),
+        _ => {}
+    }
+}
+
+fn automatic_mcp_arguments(schema: &Value, query: &str) -> Value {
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let preferred = ["query", "search_query", "q", "keywords", "keyword", "text", "prompt"];
+    let selected = preferred
+        .iter()
+        .find_map(|name| properties.get(*name).map(|_| (*name).to_string()))
+        .or_else(|| {
+            properties.iter().find_map(|(name, property)| {
+                let lower = name.to_ascii_lowercase();
+                let looks_like_query = lower.contains("query") || lower.contains("search") || lower.contains("keyword");
+                (looks_like_query && property.get("type").and_then(Value::as_str).unwrap_or("string") == "string")
+                    .then(|| name.clone())
+            })
+        })
+        .or_else(|| {
+            schema.get("required").and_then(Value::as_array).and_then(|required| {
+                required.iter().filter_map(Value::as_str).find_map(|name| {
+                    let property = properties.get(name)?;
+                    (property.get("type").and_then(Value::as_str).unwrap_or("string") == "string")
+                        .then(|| name.to_string())
+                })
+            })
+        });
+    selected
+        .map(|name| {
+            let mut arguments = serde_json::Map::new();
+            arguments.insert(name, Value::String(query.to_string()));
+            Value::Object(arguments)
+        })
+        .unwrap_or_else(|| json!({ "query": query }))
+}
+
+fn mcp_arguments(template: &str, schema: &Value, query: &str) -> Result<Value, String> {
+    if template.trim().is_empty() {
+        return Ok(automatic_mcp_arguments(schema, query));
+    }
+    let mut value = serde_json::from_str::<Value>(template)
+        .map_err(|error| format!("MCP参数模板不是合法JSON：{error}"))?;
+    if !value.is_object() {
+        return Err("MCP参数模板必须是JSON对象。".to_string());
+    }
+    replace_query_placeholder(&mut value, query);
+    Ok(value)
+}
+
+fn mcp_result_text(value: &Value) -> String {
+    let content = value.pointer("/result/content").and_then(Value::as_array);
+    if let Some(content) = content {
+        let text = content
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    value.get("result").cloned().unwrap_or_else(|| value.clone()).to_string()
+}
+
+fn execute_mcp_retrieval(payload: &RetrievalExecutePayload) -> Result<String, String> {
+    let custom_headers = parse_mcp_headers(&payload.headers_json)?;
+    let (client, session_id, tools) = connect_mcp(&payload.endpoint, &payload.api_key, &payload.headers_json)?;
+    let selected = tools
+        .iter()
+        .find(|tool| tool.name == payload.tool_name)
+        .or_else(|| tools.first())
+        .ok_or_else(|| "MCP服务器没有可用工具。".to_string())?;
+    let mut output = Vec::new();
+    for (index, query) in payload.queries.iter().take(8).enumerate() {
+        let arguments = mcp_arguments(&payload.argument_template, &selected.input_schema, query)?;
+        let (value, _) = mcp_post(
+            &client,
+            &payload.endpoint,
+            &payload.api_key,
+            &custom_headers,
+            session_id.as_deref(),
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 100 + index,
+                "method": "tools/call",
+                "params": { "name": selected.name, "arguments": arguments }
+            }),
+        )?;
+        output.push(format!("【MCP查询：{}】\n{}", query, mcp_result_text(&value)));
+    }
+    Ok(output.join("\n\n"))
+}
+
+fn execute_zhipu_retrieval(payload: &RetrievalExecutePayload) -> Result<String, String> {
+    if payload.api_key.trim().is_empty() {
+        return Err("请先填写智谱API Key。".to_string());
+    }
+    let endpoint = validated_external_url(&payload.endpoint)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| format!("无法初始化智谱搜索：{error}"))?;
+    let engine = if payload.search_engine.trim().is_empty() { "search_pro" } else { payload.search_engine.trim() };
+    let count = payload.count.clamp(1, 50);
+    let mut output = Vec::new();
+    for query in payload.queries.iter().take(8) {
+        let short_query = query.chars().take(70).collect::<String>();
+        let response = client
+            .post(endpoint)
+            .bearer_auth(payload.api_key.trim())
+            .json(&json!({
+                "search_query": short_query,
+                "search_engine": engine,
+                "search_intent": false,
+                "count": count,
+                "search_recency_filter": "noLimit",
+                "content_size": "high"
+            }))
+            .send()
+            .map_err(|error| format!("智谱搜索请求失败：{error}"))?;
+        let body = cloud_response_json(response, "智谱 Web Search")?;
+        let results = body.get("search_result").and_then(Value::as_array).cloned().unwrap_or_default();
+        let formatted = results
+            .iter()
+            .map(|item| {
+                format!(
+                    "- {} | {} | {}\n  {}\n  {}",
+                    item.get("title").and_then(Value::as_str).unwrap_or("无标题"),
+                    item.get("media").and_then(Value::as_str).unwrap_or("未知来源"),
+                    item.get("publish_date").and_then(Value::as_str).unwrap_or("日期未知"),
+                    item.get("link").and_then(Value::as_str).unwrap_or(""),
+                    item.get("content").and_then(Value::as_str).unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        output.push(format!("【智谱查询：{}】\n{}", short_query, formatted));
+    }
+    Ok(output.join("\n\n"))
+}
+
+fn execute_epo_retrieval(payload: &RetrievalExecutePayload) -> Result<String, String> {
+    if payload.api_key.trim().is_empty() || payload.client_secret.trim().is_empty() {
+        return Err("请填写EPO OPS Consumer Key和Consumer Secret。".to_string());
+    }
+    let base_url = validated_external_url(&payload.endpoint)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| format!("无法初始化EPO OPS连接：{error}"))?;
+    let auth_response = client
+        .post("https://ops.epo.org/3.2/auth/accesstoken")
+        .basic_auth(payload.api_key.trim(), Some(payload.client_secret.trim()))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("grant_type=client_credentials")
+        .send()
+        .map_err(|error| format!("EPO OPS认证失败：{error}"))?;
+    let auth = cloud_response_json(auth_response, "EPO OPS认证")?;
+    let token = auth
+        .get("access_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "EPO OPS认证响应中没有access_token。".to_string())?;
+    let count = payload.count.clamp(1, 100);
+    let search_url = format!("{}/published-data/search", base_url.trim_end_matches('/'));
+    let range = format!("1-{count}");
+    let mut output = Vec::new();
+    for query in payload.queries.iter().take(8) {
+        let response = client
+            .get(&search_url)
+            .bearer_auth(token)
+            .header("Accept", "application/json")
+            .query(&[("q", query.as_str()), ("Range", range.as_str())])
+            .send()
+            .map_err(|error| format!("EPO OPS检索失败：{error}"))?;
+        let body = cloud_response_json(response, "EPO OPS")?;
+        let mut serialized = serde_json::to_string_pretty(&body)
+            .map_err(|error| format!("无法整理EPO OPS结果：{error}"))?;
+        if serialized.len() > 180_000 {
+            serialized.truncate(180_000);
+            serialized.push_str("\n[结果过长，已截断]");
+        }
+        output.push(format!("【EPO OPS CQL：{}】\n{}", query, serialized));
+    }
+    Ok(output.join("\n\n"))
+}
+
+fn retrieval_execute_blocking(payload: RetrievalExecutePayload) -> Result<RetrievalExecuteResult, String> {
+    if payload.queries.is_empty() {
+        return Err("没有可执行的检索词。".to_string());
+    }
+    let content = match payload.provider.as_str() {
+        "zhipu" => execute_zhipu_retrieval(&payload)?,
+        "epo-ops" => execute_epo_retrieval(&payload)?,
+        "patsnap-mcp" | "custom-mcp" => execute_mcp_retrieval(&payload)?,
+        _ => return Err("不支持的联网检索服务商。".to_string()),
+    };
+    if content.trim().is_empty() {
+        return Err("检索服务未返回可供审查的内容。".to_string());
+    }
+    Ok(RetrievalExecuteResult { content })
+}
+
+#[tauri::command]
+async fn retrieval_execute(payload: RetrievalExecutePayload) -> Result<RetrievalExecuteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || retrieval_execute_blocking(payload))
+        .await
+        .map_err(|error| format!("联网检索后台任务异常结束：{error}"))?
+}
+
 #[tauri::command]
 fn save_revision(
     original_path: String,
     annotations: Vec<AnnotationPayload>,
     ratings: Option<RatingPayload>,
+    llm_report: Option<LlmReviewReportPayload>,
 ) -> Result<SaveRevisionResult, String> {
     let original = PathBuf::from(original_path);
     if !original.is_file() {
@@ -1388,6 +2656,7 @@ fn save_revision(
         fs::copy(&original, &destination).map_err(|error| format!("无法生成修订版：{error}"))?;
     }
     let rating_path = ratings
+        .as_ref()
         .filter(|value| {
             !value.technical_understanding.trim().is_empty()
                 || !value.communication.trim().is_empty()
@@ -1400,15 +2669,38 @@ fn save_revision(
             Ok::<String, String>(path.to_string_lossy().into_owned())
         })
         .transpose()?;
+    let review_path = llm_report
+        .filter(|value| !value.findings.is_empty())
+        .map(|value| {
+            let path = review_workbook_path(&original);
+            let case_name = original.file_name().and_then(|value| value.to_str()).unwrap_or("专利文件");
+            write_review_workbook(&path, case_name, ratings.as_ref(), &value)?;
+            Ok::<String, String>(path.to_string_lossy().into_owned())
+        })
+        .transpose()?;
     Ok(SaveRevisionResult {
         revision_path: destination.to_string_lossy().into_owned(),
         rating_path,
+        review_path,
     })
 }
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![open_document, save_revision, cloud_ocr, open_external_url])
+        .invoke_handler(tauri::generate_handler![
+            open_document,
+            open_comparison_documents,
+            save_revision,
+            cloud_ocr,
+            llm_completion,
+            llm_list_models,
+            llm_agent_turn,
+            mcp_list_tools,
+            retrieval_list_tools,
+            retrieval_call_tool,
+            retrieval_execute,
+            open_external_url
+        ])
         .run(tauri::generate_context!())
         .expect("启动专利阅研失败");
 }
@@ -1417,6 +2709,52 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parses_and_sorts_openai_compatible_model_lists() {
+        let models = parse_llm_model_ids(&json!({
+            "data": [
+                { "id": "deepseek-v4-pro" },
+                { "id": "deepseek-v4-flash" },
+                { "id": "deepseek-v4-pro" }
+            ]
+        }));
+        assert_eq!(models, vec!["deepseek-v4-flash", "deepseek-v4-pro"]);
+    }
+
+    #[test]
+    fn parses_native_llm_tool_calls_for_the_research_agent() {
+        let calls = parse_agent_tool_calls(&json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "ops_search",
+                    "arguments": "{\"query\":\"ti=bellows AND ab=valve\"}"
+                }
+            }]
+        })).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "ops_search");
+        assert_eq!(calls[0].arguments["query"], "ti=bellows AND ab=valve");
+    }
+
+    #[test]
+    fn exposes_search_and_detail_tools_for_iterative_epo_research() {
+        let tools = epo_research_tools();
+        let names = tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>();
+        assert!(names.contains(&"ops_search"));
+        assert!(names.contains(&"ops_get_abstract"));
+        assert!(names.contains(&"ops_get_fulltext"));
+        assert!(names.contains(&"ops_get_family"));
+        assert!(looks_mutating_mcp_tool(&research_tool(
+            "delete_document",
+            "Delete a document",
+            json!({ "type": "object" }),
+        )));
+    }
 
     #[test]
     fn cloud_ocr_rejects_non_image_payloads_before_network_access() {
@@ -1517,6 +2855,51 @@ mod tests {
         if requested_path.is_none() {
             fs::remove_dir_all(directory).unwrap();
         }
+    }
+
+    #[test]
+    fn writes_llm_review_workbook_with_findings_and_audit_metadata() {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("patent-reader-llm-report-{unique}"));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("示例专利-LLM审查报告.xlsx");
+        let report = LlmReviewReportPayload {
+            technical_field: "太阳能电池".to_string(),
+            rulebook_version: "1.0.1".to_string(),
+            rulebook_verified_at: "2026-07-30".to_string(),
+            provider: "OpenAI".to_string(),
+            model: "gpt-5.6-terra".to_string(),
+            generated_at: "2026-07-30T10:00:00+08:00".to_string(),
+            findings: vec![LlmReviewFindingPayload {
+                module: "清楚性、支持性及形式缺陷".to_string(),
+                severity: "重要".to_string(),
+                evidence_level: "规则库核验".to_string(),
+                title: "术语前后不一致".to_string(),
+                location: "权利要求1".to_string(),
+                quote: "所述封装层".to_string(),
+                analysis: "说明书中使用封装胶膜，名称不一致。".to_string(),
+                recommendation: "统一术语并核对保护范围。".to_string(),
+                sources: "专利审查指南：https://www.cnipa.gov.cn/".to_string(),
+                accepted: true,
+            }],
+        };
+        let ratings = RatingPayload {
+            technical_understanding: "A".to_string(),
+            communication: "B".to_string(),
+            patent_quality: "C".to_string(),
+        };
+        write_review_workbook(&path, "示例专利.docx", Some(&ratings), &report).unwrap();
+
+        let mut archive = ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        let mut shared_strings = String::new();
+        archive.by_name("xl/sharedStrings.xml").unwrap().read_to_string(&mut shared_strings).unwrap();
+        assert!(shared_strings.contains("序号"));
+        assert!(shared_strings.contains("术语前后不一致"));
+        assert!(shared_strings.contains("规则库核验"));
+        assert!(shared_strings.contains("太阳能电池"));
+        assert!(shared_strings.contains("1.0.1"));
+        assert!(shared_strings.contains("已采纳"));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1648,6 +3031,49 @@ mod tests {
 
         assert!(document.contains("<w:t>前缀文字。出口</w:t></w:r><w:commentRangeStart w:id=\"8\"/><w:r><w:t>12围合的阴影范围内。"));
         assert!(document.contains("阀头221不会偏出出口12之外，</w:t></w:r><w:commentRangeEnd w:id=\"8\"/><w:r><w:commentReference w:id=\"8\"/></w:r><w:r><w:t>后缀文字。"));
+    }
+
+    #[test]
+    fn parses_streamable_http_mcp_sse_payloads() {
+        let value = parse_mcp_wire_json(
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n",
+        ).unwrap();
+        assert_eq!(value["result"]["tools"], json!([]));
+    }
+
+    #[test]
+    fn reads_mcp_tool_metadata_and_builds_query_arguments() {
+        let response = json!({
+            "result": {
+                "tools": [{
+                    "name": "search_patents",
+                    "description": "检索专利",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "query": { "type": "string" } },
+                        "required": ["query"]
+                    }
+                }]
+            }
+        });
+        let tools = parse_mcp_tools(&response);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "search_patents");
+        assert_eq!(
+            mcp_arguments("", &tools[0].input_schema, "solar cell").unwrap(),
+            json!({ "query": "solar cell" }),
+        );
+        assert_eq!(
+            mcp_arguments(
+                r#"{"search_expression":"{{query}}","limit":20}"#,
+                &tools[0].input_schema,
+                "pn=CN123",
+            ).unwrap(),
+            json!({ "search_expression": "pn=CN123", "limit": 20 }),
+        );
+        let headers = parse_mcp_headers(r#"{"X-API-Key":"secret","X-Tenant":"patent"}"#).unwrap();
+        assert_eq!(headers.get("x-tenant").unwrap(), "patent");
+        assert!(parse_mcp_headers(r#"{"Content-Length":"12"}"#).is_err());
     }
 
     #[test]

@@ -24,8 +24,22 @@ if (!window.patentReader && tauri.__TAURI__?.core?.invoke) {
       originalPath: string,
       annotations: PatentAnnotation[],
       ratings: PatentRatingsPayload,
-    ) => tauri.__TAURI__!.core!.invoke<PatentSaveRevisionResult>('save_revision', { originalPath, annotations, ratings }),
+      llmReport: PatentLlmReviewReportPayload | null,
+    ) => tauri.__TAURI__!.core!.invoke<PatentSaveRevisionResult>('save_revision', {
+      originalPath,
+      annotations,
+      ratings,
+      llmReport,
+    }),
+    openComparisonDocuments: () => tauri.__TAURI__!.core!.invoke<TauriDocument[]>('open_comparison_documents'),
     cloudOcr: (payload: PatentCloudOcrPayload) => tauri.__TAURI__!.core!.invoke<PatentCloudOcrResult>('cloud_ocr', { payload }),
+    llmCompletion: (payload: PatentLlmCompletionPayload) => tauri.__TAURI__!.core!.invoke<{ content: string }>('llm_completion', { payload }),
+    llmListModels: (payload: PatentLlmModelListPayload) => tauri.__TAURI__!.core!.invoke<{ models: string[] }>('llm_list_models', { payload }),
+    llmAgentTurn: (payload: PatentLlmAgentTurnPayload) => tauri.__TAURI__!.core!.invoke<PatentLlmAgentTurnResult>('llm_agent_turn', { payload }),
+    mcpListTools: (payload: PatentMcpListToolsPayload) => tauri.__TAURI__!.core!.invoke<{ tools: PatentMcpTool[] }>('mcp_list_tools', { payload }),
+    retrievalListTools: (payload: PatentResearchListToolsPayload) => tauri.__TAURI__!.core!.invoke<{ tools: PatentMcpTool[] }>('retrieval_list_tools', { payload }),
+    retrievalCallTool: (payload: PatentResearchToolCallPayload) => tauri.__TAURI__!.core!.invoke<{ content: string }>('retrieval_call_tool', { payload }),
+    retrievalExecute: (payload: PatentRetrievalExecutePayload) => tauri.__TAURI__!.core!.invoke<{ content: string }>('retrieval_execute', { payload }),
     openExternalUrl: (url: string) => tauri.__TAURI__!.core!.invoke<void>('open_external_url', { url }),
   }
 }
