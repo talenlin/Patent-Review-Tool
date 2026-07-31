@@ -1,6 +1,8 @@
 import { reviewRulebook, selectRulesForModules, sourceForRule, type ReviewModuleKey } from './review-rulebook'
 import type { RetrievalProvider } from './llm-settings'
 import type { PriorArtCandidate } from './prior-art-selection'
+import type { ReviewWorkPacket } from './review-execution'
+import { extractJsonObject } from './json-extraction'
 export { detectTechnicalField, extractClaimsText, technicalFieldsDiffer } from './technical-field'
 
 export type ReviewScope = 'claims' | 'full' | 'full-with-prior-art'
@@ -39,9 +41,11 @@ export type ReviewRunOptions = {
   patentText: string
   claimsText: string
   comparisonDocuments: ComparisonDocument[]
-  searchEvidence: string
+  technicalEvidence: string
+  priorArtSearchEvidence: string
   allowPriorArtNetworkSearch: boolean
   selectedClosestPriorArt?: PriorArtCandidate | null
+  workPacket?: ReviewWorkPacket
 }
 
 const moduleLabels: Record<ReviewModuleKey, string> = {
@@ -100,7 +104,10 @@ function sourceSummary(sourceIds: string[]) {
 }
 
 function ruleContext(options: ReviewRunOptions) {
-  return selectRulesForModules(options.modules, options.patentText)
+  const categories = new Set(options.workPacket?.ruleCategories ?? [])
+  return selectRulesForModules(options.modules, options.patentText, options.workPacket ? 77 : 36)
+    .filter((rule) => !categories.size || categories.has(rule.category))
+    .slice(0, options.workPacket ? 24 : 36)
     .map((rule) => ({
       id: rule.id,
       category: rule.category,
@@ -117,13 +124,19 @@ function ruleContext(options: ReviewRunOptions) {
 }
 
 export function buildReviewMessages(options: ReviewRunOptions) {
-  const patentContent = options.scope === 'claims' ? options.claimsText : options.patentText.slice(0, 120_000)
+  const packetContextMode = options.workPacket?.contextMode
+  const patentContent = options.scope === 'claims' || packetContextMode === 'claims' || packetContextMode === 'prior-art'
+    ? options.claimsText.slice(0, 60_000)
+    : options.patentText.slice(0, options.workPacket ? 90_000 : 120_000)
   const comparisonText = options.modules.includes('priorArt')
     ? options.comparisonDocuments.map((document, index) => `【对比文件${index + 1}：${document.name}】\n${document.text.slice(0, 70_000)}`).join('\n\n')
     : ''
   const rules = ruleContext(options)
   const selectedModules = options.modules.map((module) => `${module}: ${moduleLabels[module]}`)
   const selectedInstructions = options.modules.map((module) => reviewModuleInstructions[module])
+  const packetInstruction = options.workPacket
+    ? `\n\n本次调用是完整审查中的独立任务包“${options.workPacket.title}”。只审查以下焦点，不要扩展到其他任务包，也不要重复输出不属于本任务包的问题：\n${options.workPacket.focus}\n完成充分思考后直接输出本任务包的JSON结果。即使未发现问题，也必须输出{"findings":[]}。`
+    : ''
   return {
     system: `你是资深中国专利工程师和专利代理实务审查助手。你应理解用户确认的具体技术领域，但不得把能力限制在某个预设行业。你熟悉中国专利申请的授权、复审、无效和侵权维权流程，目标是在合理保护范围、授权可行性、确权稳定性与维权可执行性之间取得平衡。你只进行辅助审查，不构成法律意见。
 
@@ -147,7 +160,7 @@ export function buildReviewMessages(options: ReviewRunOptions) {
 3. 法律结论优先依据随请求提供的规则库；技术事实必须引用可核验来源，否则标记为“LLM推断”或“待人工核验”。
 4. 新颖性和创造性必须以本次提供的对比文件材料为基础。${options.allowPriorArtNetworkSearch ? '联网候选文献可与用户上传文件共同参加最接近现有技术的比较，但必须标明联网来源并提示人工复核公开日、全文和法律状态。' : '本次未启用联网补检，只能使用用户上传的对比文件。'}必须把用户选定或系统明确指定的文件作为最接近现有技术，不得擅自改用其他文件。
 5. 风险等级使用“重要/一般/提示”；没有发现问题的模块不要虚构问题。
-6. 输出合法JSON，不要使用Markdown围栏，不要输出寒暄、审查过程或JSON以外的文字。
+ 6. 输出合法JSON，不要使用Markdown围栏，不要输出寒暄、审查过程或JSON以外的文字。${packetInstruction}
 
 本次所选模块的专项审查指令如下。请把这些指令作为同一套连贯工作流执行，但必须在每条结果的module字段中保留所属模块：
 
@@ -177,13 +190,24 @@ ${selectedInstructions.join('\n\n')}`,
         }],
       },
       selectedModules,
+      workPacket: options.workPacket ? {
+        id: options.workPacket.id,
+        title: options.workPacket.title,
+        focus: options.workPacket.focus,
+        claimNumber: options.workPacket.claimNumber,
+      } : '未启用任务分包',
       technicalField: options.technicalField,
       rulebook: {
         version: reviewRulebook.metadata.version,
         verifiedAt: reviewRulebook.metadata.lastVerifiedAt,
         rules,
       },
-      searchEvidence: options.searchEvidence || '未启用联网技术事实检索',
+      technicalFactEvidence: options.modules.includes('technical')
+        ? options.technicalEvidence || '未启用联网技术事实检索；技术事实只能由主文本推断并标为待人工核验'
+        : '本次未选择技术理解与技术缺陷模块',
+      priorArtSearchEvidence: options.modules.includes('priorArt')
+        ? options.priorArtSearchEvidence || '未启用联网补检，仅使用用户上传的对比文件'
+        : '本次未选择新颖性与创造性模块',
       selectedClosestPriorArt: options.selectedClosestPriorArt || '本次未启用新颖性与创造性评价',
       patentText: patentContent,
       comparisonDocuments: comparisonText || '未提供用户上传的对比文件',
@@ -193,12 +217,12 @@ ${selectedInstructions.join('\n\n')}`,
 
 export function buildSearchPlanMessages(technicalField: string, claimsText: string) {
   return {
-    system: '你是专利技术检索规划助手。只生成检索计划，不评价专利性。输出纯文本，不使用Markdown表格。',
+    system: '你是专利现有技术检索规划助手。只生成候选对比文件检索计划，不评价专利性。输出纯文本，不使用Markdown表格。',
     user: `技术领域：${technicalField || '未填写'}
 权利要求摘要：
 ${claimsText.slice(0, 12_000)}
 
-请生成可编辑的技术事实检索计划，必须包含：核心技术问题、中文/英文关键词、同义词、可能的IPC/CPC分类、优先来源（专利/论文/标准/权威机构资料）和建议检索式。不要检索，也不要给出结论。`,
+请生成可编辑的候选对比文件检索计划，必须包含：核心发明构思、必要技术特征、中文/英文关键词、同义词、可能的IPC/CPC分类、优先专利数据库和建议检索式。不要检索，也不要给出新颖性或创造性结论。`,
   }
 }
 
@@ -218,7 +242,7 @@ export function buildRetrievalQueryMessages(provider: RetrievalProvider, searchP
 }
 
 export function parseRetrievalQueries(content: string) {
-  const cleaned = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+  const cleaned = extractJsonObject(content)
   const parsed = JSON.parse(cleaned) as { queries?: unknown[] }
   const seen = new Set<string>()
   return (parsed.queries ?? []).flatMap((query) => {
@@ -231,9 +255,12 @@ export function parseRetrievalQueries(content: string) {
 }
 
 export function parseReviewFindings(content: string, modules: ReviewModuleKey[]): LlmReviewFinding[] {
-  const cleaned = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-  const parsed = JSON.parse(cleaned) as { findings?: Array<Partial<LlmReviewFinding>> }
-  return (parsed.findings ?? []).flatMap((finding, index) => {
+  const cleaned = extractJsonObject(content)
+  const parsed = JSON.parse(cleaned) as { findings?: unknown }
+  if (!Array.isArray(parsed.findings)) {
+    throw new Error('LLM返回结果缺少findings数组，无法判断是“未发现问题”还是输出格式错误。')
+  }
+  return (parsed.findings as Array<Partial<LlmReviewFinding>>).flatMap((finding, index) => {
     if (!finding.title || !finding.analysis || !finding.module || !modules.includes(finding.module)) return []
     const evidenceLevel: ReviewEvidenceLevel = ['规则库核验', '联网来源核验', 'LLM推断', '待人工核验'].includes(finding.evidenceLevel ?? '')
       ? finding.evidenceLevel as ReviewEvidenceLevel

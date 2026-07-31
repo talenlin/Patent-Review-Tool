@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use lopdf::{dictionary, Document, Object, ObjectId, StringFormat};
 use rfd::FileDialog;
 use reqwest::blocking::{multipart, Client, Response};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING};
 use rust_xlsxwriter::{Format, Workbook};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1282,6 +1282,125 @@ fn cloud_response_json(response: Response, provider: &str) -> Result<Value, Stri
     serde_json::from_str(&body).map_err(|error| format!("{provider} 返回的不是有效 JSON：{error}"))
 }
 
+const LLM_COMPLETION_TIMEOUT_SECS: u64 = 720;
+
+fn llm_body_read_error_message(provider: &str, detail: &str) -> String {
+    format!(
+        "{provider} 响应传输中断或超时，未能完整读取审查结果（{detail}）。\
+已完成的技术事实检索和证据选择会保留；请点击“重试后续审查”，不会重新进行技术事实检索。"
+    )
+}
+
+fn llm_response_json(response: Response, provider: &str) -> Result<Value, String> {
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| llm_body_read_error_message(provider, &error.to_string()))?;
+    if !status.is_success() {
+        let summary = body.chars().take(240).collect::<String>();
+        return Err(format!("{provider} 请求失败（HTTP {status}）：{summary}"));
+    }
+    serde_json::from_str(&body).map_err(|error| format!("{provider} 返回的不是有效 JSON：{error}"))
+}
+
+fn llm_empty_content_error_message(provider: &str, body: &Value) -> String {
+    let finish_reason = body
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let prompt_tokens = body
+        .pointer("/usage/prompt_tokens")
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let completion_tokens = body
+        .pointer("/usage/completion_tokens")
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "{provider}返回了空结果（finish_reason={finish_reason}，\
+prompt_tokens={prompt_tokens}，completion_tokens={completion_tokens}）。"
+    )
+}
+
+#[derive(Debug, PartialEq)]
+enum LlmCompletionResolution {
+    Complete(String),
+    FinalizeReasoning(String),
+    Empty,
+}
+
+fn resolve_llm_completion(body: &Value) -> LlmCompletionResolution {
+    let content = body
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .or_else(|| body.pointer("/choices/0/message/final_content").and_then(Value::as_str))
+        .or_else(|| body.pointer("/output_text").and_then(Value::as_str))
+        .unwrap_or_default()
+        .trim();
+    if !content.is_empty() {
+        return LlmCompletionResolution::Complete(content.to_string());
+    }
+    let reasoning = body
+        .pointer("/choices/0/message/reasoning_content")
+        .and_then(Value::as_str)
+        .or_else(|| body.pointer("/choices/0/message/reasoning").and_then(Value::as_str))
+        .unwrap_or_default()
+        .trim();
+    if !reasoning.is_empty() {
+        return LlmCompletionResolution::FinalizeReasoning(reasoning.to_string());
+    }
+    LlmCompletionResolution::Empty
+}
+
+fn is_deepseek_provider(provider: &str, endpoint: &str) -> bool {
+    provider.trim().eq_ignore_ascii_case("deepseek")
+        || endpoint.to_ascii_lowercase().contains("api.deepseek.com")
+}
+
+fn llm_finalization_request_body(model: &str, reasoning: &str) -> Value {
+    json!({
+        "model": model.trim(),
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是专利审查结果的结构化收尾器。上游模型已经完成深度思考，你只负责把既有分析整理成最终JSON，不重新分析，不增加、删除或合并实质结论。输出必须是合法JSON对象，顶层仅含findings数组；每项保留module、title、severity、evidenceLevel、location、quote、analysis、recommendation和sources。找不到问题时输出{\"findings\":[]}。不要输出Markdown或解释。"
+            },
+            {
+                "role": "user",
+                "content": format!("请将以下已完成的深度分析整理为最终审查卡片JSON：\n\n{reasoning}")
+            }
+        ],
+        "thinking": { "type": "disabled" },
+        "response_format": { "type": "json_object" },
+        "max_tokens": 16384,
+        "stream": false,
+    })
+}
+
+fn llm_completion_request_body(
+    provider: &str,
+    endpoint: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> Value {
+    let mut body = json!({
+        "model": model.trim(),
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user }
+        ],
+        "stream": false,
+    });
+    if is_deepseek_provider(provider, endpoint) {
+        body["thinking"] = json!({ "type": "enabled" });
+        body["response_format"] = json!({ "type": "json_object" });
+    }
+    body
+}
+
 fn image_base64(data_url: &str) -> Result<&str, String> {
     if !data_url.starts_with("data:image/") {
         return Err("云 OCR 只允许上传附图（PNG/JPEG 等图像），不会接收正文或原文件。".to_string());
@@ -1594,8 +1713,9 @@ async fn cloud_ocr(payload: CloudOcrPayload) -> Result<CloudOcrResult, String> {
 
 fn validated_external_url(url: &str) -> Result<&str, String> {
     let trimmed = url.trim();
-    if !trimmed.starts_with("https://") || trimmed.chars().any(char::is_whitespace) {
-        return Err("仅允许打开安全的 HTTPS 地址。".to_string());
+    let browser_safe_scheme = trimmed.starts_with("https://") || trimmed.starts_with("http://");
+    if !browser_safe_scheme || trimmed.chars().any(char::is_whitespace) {
+        return Err("仅允许打开 HTTP(S) 网页地址。".to_string());
     }
     Ok(trimmed)
 }
@@ -1683,34 +1803,48 @@ fn llm_completion_blocking(payload: LlmCompletionPayload) -> Result<LlmCompletio
         return Err("本次审查内容超过安全传输上限，请缩小审查范围。".to_string());
     }
     let client = Client::builder()
-        .timeout(Duration::from_secs(240))
+        .timeout(Duration::from_secs(LLM_COMPLETION_TIMEOUT_SECS))
         .build()
         .map_err(|error| format!("无法初始化LLM请求：{error}"))?;
+    let request_body = llm_completion_request_body(
+        &payload.provider,
+        endpoint,
+        &payload.model,
+        &payload.system,
+        &payload.user,
+    );
     let response = client
         .post(endpoint)
         .bearer_auth(payload.api_key.trim())
-        .json(&json!({
-            "model": payload.model.trim(),
-            "messages": [
-                { "role": "system", "content": payload.system },
-                { "role": "user", "content": payload.user }
-            ],
-            "stream": false
-        }))
+        .header(ACCEPT_ENCODING, "identity")
+        .json(&request_body)
         .send()
         .map_err(|error| format!("{}请求失败：{error}", payload.purpose))?;
     let provider_name = if payload.provider.trim().is_empty() { "LLM" } else { payload.provider.trim() };
-    let body = cloud_response_json(response, provider_name)?;
-    let content = body.pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .or_else(|| body.pointer("/output_text").and_then(Value::as_str))
-        .ok_or_else(|| format!("{provider_name}返回内容中没有可读取的文本。"))?
-        .trim()
-        .to_string();
-    if content.is_empty() {
-        return Err(format!("{provider_name}返回了空结果。"));
+    let body = llm_response_json(response, provider_name)?;
+    match resolve_llm_completion(&body) {
+        LlmCompletionResolution::Complete(content) => Ok(LlmCompletionResult { content }),
+        LlmCompletionResolution::FinalizeReasoning(reasoning)
+            if is_deepseek_provider(&payload.provider, endpoint) => {
+                let finalization_body = llm_finalization_request_body(&payload.model, &reasoning);
+                let finalization_response = client
+                    .post(endpoint)
+                    .bearer_auth(payload.api_key.trim())
+                    .header(ACCEPT_ENCODING, "identity")
+                    .json(&finalization_body)
+                    .send()
+                    .map_err(|error| format!("{}已完成深度思考，但自动整理审查卡片失败：{error}", payload.purpose))?;
+                let finalization_json = llm_response_json(finalization_response, provider_name)?;
+                match resolve_llm_completion(&finalization_json) {
+                    LlmCompletionResolution::Complete(content) => Ok(LlmCompletionResult { content }),
+                    _ => Err(format!(
+                        "{}；已检测到完整reasoning_content并自动执行JSON收尾，但收尾请求仍未返回最终内容。",
+                        llm_empty_content_error_message(provider_name, &finalization_json),
+                    )),
+                }
+            }
+        _ => Err(llm_empty_content_error_message(provider_name, &body)),
     }
-    Ok(LlmCompletionResult { content })
 }
 
 #[tauri::command]
@@ -2711,6 +2845,75 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn long_non_streaming_llm_reviews_have_an_actionable_transport_policy() {
+        assert!(
+            LLM_COMPLETION_TIMEOUT_SECS >= 600,
+            "长专利分模块审查需要至少10分钟的响应读取窗口"
+        );
+        let hint = llm_body_read_error_message(
+            "DeepSeek",
+            "error decoding response body: operation timed out",
+        );
+        assert!(hint.contains("响应传输中断或超时"));
+        assert!(hint.contains("不会重新进行技术事实检索"));
+    }
+
+    #[test]
+    fn empty_llm_response_reports_finish_reason_and_usage() {
+        let hint = llm_empty_content_error_message(
+            "DeepSeek",
+            &json!({
+                "choices": [{ "finish_reason": "length", "message": { "content": "" } }],
+                "usage": { "prompt_tokens": 1234, "completion_tokens": 8192 }
+            }),
+        );
+        assert!(hint.contains("finish_reason=length"));
+        assert!(hint.contains("completion_tokens=8192"));
+    }
+
+    #[test]
+    fn deepseek_reasoning_only_response_requests_a_json_finalization_pass() {
+        let resolution = resolve_llm_completion(&json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "已完成支持性审查，发现说明书没有给出弹性系数和有效面积。"
+                }
+            }],
+            "usage": { "prompt_tokens": 14374, "completion_tokens": 12966 }
+        }));
+        assert_eq!(
+            resolution,
+            LlmCompletionResolution::FinalizeReasoning(
+                "已完成支持性审查，发现说明书没有给出弹性系数和有效面积。".to_string(),
+            ),
+            "思考内容完整但最终content为空时，应进入结构化收尾流程，而不是直接报空结果",
+        );
+        let body = llm_finalization_request_body(
+            "deepseek-v4-flash",
+            "已完成支持性审查，发现说明书没有给出弹性系数和有效面积。",
+        );
+        assert_eq!(body.pointer("/thinking/type").and_then(Value::as_str), Some("disabled"));
+        assert_eq!(body.pointer("/response_format/type").and_then(Value::as_str), Some("json_object"));
+        assert!(body.pointer("/messages/1/content").and_then(Value::as_str).unwrap().contains("弹性系数"));
+    }
+
+    #[test]
+    fn deepseek_card_review_keeps_thinking_and_requires_json() {
+        let body = llm_completion_request_body(
+            "DeepSeek",
+            "https://api.deepseek.com/chat/completions",
+            "deepseek-v4-flash",
+            "system prompt",
+            "user prompt",
+        );
+        assert_eq!(body.pointer("/thinking/type").and_then(Value::as_str), Some("enabled"));
+        assert_eq!(body.pointer("/response_format/type").and_then(Value::as_str), Some("json_object"));
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
     fn parses_and_sorts_openai_compatible_model_lists() {
         let models = parse_llm_model_ids(&json!({
             "data": [
@@ -2772,12 +2975,17 @@ mod tests {
     }
 
     #[test]
-    fn external_links_allow_https_and_reject_remote_http() {
+    fn external_links_allow_browser_safe_http_and_https_only() {
         assert_eq!(
             validated_external_url("https://ocr.space/ocrapi/freekey").unwrap(),
             "https://ocr.space/ocrapi/freekey"
         );
-        assert!(validated_external_url("http://example.com/key").is_err());
+        assert_eq!(
+            validated_external_url("http://example.com/legacy-engineering-source").unwrap(),
+            "http://example.com/legacy-engineering-source"
+        );
+        assert!(validated_external_url("file:///C:/Windows/System32/calc.exe").is_err());
+        assert!(validated_external_url("javascript:alert(1)").is_err());
     }
 
     #[test]

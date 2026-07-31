@@ -1,6 +1,6 @@
 [package]
 name = "patent-reader-v1"
-version = "2.0.0"
+version = "2.1.0"
 description = "Windows 本地专利阅读与图文关联辅助工具"
 authors = ["Patent Reader"]
 edition = "2021"

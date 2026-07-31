@@ -1131,7 +1131,8 @@ function App() {
           <footer className="ocr-modal-actions"><button type="button" className="quiet-button" onClick={() => setIsOcrSettingsOpen(false)}>取消</button><button type="button" className="ocr-apply" onClick={applyOcrSettings}>应用识别方式</button></footer>
         </section>
       </div>}
-      {isLlmReviewOpen && <LlmReviewDialog
+      <LlmReviewDialog
+        open={isLlmReviewOpen}
         patentText={file.text}
         findings={llmFindings}
         onFindingsChange={(nextFindings, metadata) => {
@@ -1140,7 +1141,7 @@ function App() {
         }}
         onClose={() => setIsLlmReviewOpen(false)}
         onNotice={setNotice}
-      />}
+      />
       {expandedFigure && <div className="figure-detail-backdrop" onClick={() => setExpandedFigure(null)}>
         <section className="figure-detail-dialog" role="dialog" aria-modal="true" aria-label={`附图 ${expandedFigure.index + 1} 详情`} onClick={(event) => event.stopPropagation()}>
           <header className="figure-detail-header">

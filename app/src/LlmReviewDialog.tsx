@@ -14,6 +14,16 @@ import {
 import {
   runMcpResearchAgent, type ResearchTraceEntry, type ResearchTool,
 } from './mcp-research-agent'
+import {
+  buildTechnicalFactPlanMessages, formatTechnicalFactEvidence, parseTechnicalFactEvidence,
+  retrievalProviderSupportsTechnicalFacts, selectTechnicalFactToolNames,
+  technicalFactResearchBudget, type TechnicalFactEvidenceBundle,
+} from './technical-fact-research'
+import {
+  buildReviewDiagnostic, completedModulesForPackets, createReviewWorkPackets, formatReviewProgress,
+  mergeReviewFindings, remainingReviewPackets,
+  type ReviewProgress,
+} from './review-execution'
 import { detectTechnicalField, extractClaimsText, technicalFieldsDiffer } from './technical-field'
 import {
   llmProviderApiLinks, llmProviderLabels, modelListEndpointFor, parseStoredLlmSettings, parseStoredRetrievalSettings,
@@ -22,6 +32,9 @@ import {
 } from './llm-settings'
 import { reviewRulebook, type ReviewModuleKey } from './review-rulebook'
 import { sortReviewFindings, type ReviewFindingSort } from './review-finding-sort'
+import {
+  createLlmReviewSessionKey, loadLlmReviewSession, saveLlmReviewSession,
+} from './llm-review-session'
 import { base64ToArrayBuffer, parseDocx } from './document-analysis'
 import { parsePdf } from './pdf-analysis'
 
@@ -33,6 +46,7 @@ export type LlmRunMetadata = {
 }
 
 type LlmReviewDialogProps = {
+  open: boolean
   patentText: string
   findings: LlmReviewFinding[]
   onFindingsChange: (findings: LlmReviewFinding[], metadata: LlmRunMetadata) => void
@@ -68,6 +82,7 @@ function sourceText(finding: LlmReviewFinding) {
 }
 
 export default function LlmReviewDialog({
+  open,
   patentText,
   findings,
   onFindingsChange,
@@ -76,35 +91,74 @@ export default function LlmReviewDialog({
 }: LlmReviewDialogProps) {
   const detectedField = useMemo(() => detectTechnicalField(patentText), [patentText])
   const claimsText = useMemo(() => extractClaimsText(patentText), [patentText])
+  const reviewSessionKey = useMemo(() => createLlmReviewSessionKey(patentText), [patentText])
+  const restoredSession = useMemo(
+    () => loadLlmReviewSession(window.sessionStorage, reviewSessionKey),
+    [reviewSessionKey],
+  )
   const [settings, setSettings] = useState<LlmSettingsStore>(storedLlmSettings)
   const [retrieval, setRetrieval] = useState<RetrievalSettings>(storedRetrievalSettings)
   const [rememberSettings, setRememberSettings] = useState(true)
-  const [manualField, setManualField] = useState(detectedField)
-  const [fieldChoice, setFieldChoice] = useState<'manual' | 'detected'>('manual')
+  const [manualField, setManualField] = useState(restoredSession?.manualField ?? detectedField)
+  const [fieldChoice, setFieldChoice] = useState<'manual' | 'detected'>(restoredSession?.fieldChoice ?? 'manual')
   const [modules, setModules] = useState<Record<ReviewModuleKey, boolean>>({
     technical: true,
     legal: true,
     priorArt: true,
     enforcement: true,
+    ...restoredSession?.modules,
   })
-  const [scope, setScope] = useState<ReviewScope>('full')
-  const [comparisonDocuments, setComparisonDocuments] = useState<ComparisonDocument[]>([])
-  const [technicalSearchEnabled, setTechnicalSearchEnabled] = useState(false)
-  const [priorArtSearchEnabled, setPriorArtSearchEnabled] = useState(false)
-  const [searchPlan, setSearchPlan] = useState('')
-  const [searchPlanConfirmed, setSearchPlanConfirmed] = useState(false)
+  const [scope, setScope] = useState<ReviewScope>((restoredSession?.scope as ReviewScope | undefined) ?? 'full')
+  const [comparisonDocuments, setComparisonDocuments] = useState<ComparisonDocument[]>(
+    restoredSession?.comparisonDocuments ?? [],
+  )
+  const [technicalSearchEnabled, setTechnicalSearchEnabled] = useState(restoredSession?.technicalSearchEnabled ?? false)
+  const [priorArtSearchEnabled, setPriorArtSearchEnabled] = useState(restoredSession?.priorArtSearchEnabled ?? false)
+  const [technicalSearchPlan, setTechnicalSearchPlan] = useState(restoredSession?.technicalSearchPlan ?? '')
+  const [technicalSearchPlanConfirmed, setTechnicalSearchPlanConfirmed] = useState(restoredSession?.technicalSearchPlanConfirmed ?? false)
+  const [priorArtSearchPlan, setPriorArtSearchPlan] = useState(restoredSession?.priorArtSearchPlan ?? '')
+  const [priorArtSearchPlanConfirmed, setPriorArtSearchPlanConfirmed] = useState(restoredSession?.priorArtSearchPlanConfirmed ?? false)
   const [availableModels, setAvailableModels] = useState<Partial<Record<LlmProvider, string[]>>>({})
   const [mcpTools, setMcpTools] = useState<Partial<Record<RetrievalProvider, PatentMcpTool[]>>>({})
-  const [researchTrace, setResearchTrace] = useState<ResearchTraceEntry[]>([])
-  const [researchSummary, setResearchSummary] = useState('')
-  const [findingSort, setFindingSort] = useState<ReviewFindingSort>('document')
-  const [priorArtCandidates, setPriorArtCandidates] = useState<PriorArtCandidate[]>([])
-  const [selectedPriorArtId, setSelectedPriorArtId] = useState('')
-  const [pendingSearchEvidence, setPendingSearchEvidence] = useState('')
-  const [pendingReviewModules, setPendingReviewModules] = useState<ReviewModuleKey[]>([])
+  const [technicalResearchTrace, setTechnicalResearchTrace] = useState<ResearchTraceEntry[]>(
+    (restoredSession?.technicalResearchTrace as ResearchTraceEntry[] | undefined) ?? [],
+  )
+  const [priorArtResearchTrace, setPriorArtResearchTrace] = useState<ResearchTraceEntry[]>(
+    (restoredSession?.priorArtResearchTrace as ResearchTraceEntry[] | undefined) ?? [],
+  )
+  const [technicalResearchSummary, setTechnicalResearchSummary] = useState(restoredSession?.technicalResearchSummary ?? '')
+  const [priorArtResearchSummary, setPriorArtResearchSummary] = useState(restoredSession?.priorArtResearchSummary ?? '')
+  const [technicalFactBundle, setTechnicalFactBundle] = useState<TechnicalFactEvidenceBundle | null>(
+    (restoredSession?.technicalFactBundle as TechnicalFactEvidenceBundle | null | undefined) ?? null,
+  )
+  const [selectedTechnicalFactIds, setSelectedTechnicalFactIds] = useState<string[]>(restoredSession?.selectedTechnicalFactIds ?? [])
+  const [findingSort, setFindingSort] = useState<ReviewFindingSort>((restoredSession?.findingSort as ReviewFindingSort | undefined) ?? 'document')
+  const [priorArtCandidates, setPriorArtCandidates] = useState<PriorArtCandidate[]>(
+    (restoredSession?.priorArtCandidates as PriorArtCandidate[] | undefined) ?? [],
+  )
+  const [selectedPriorArtId, setSelectedPriorArtId] = useState(restoredSession?.selectedPriorArtId ?? '')
+  const [pendingTechnicalEvidence, setPendingTechnicalEvidence] = useState(restoredSession?.pendingTechnicalEvidence ?? '')
+  const [pendingPriorArtEvidence, setPendingPriorArtEvidence] = useState(restoredSession?.pendingPriorArtEvidence ?? '')
+  const [pendingReviewModules, setPendingReviewModules] = useState<ReviewModuleKey[]>(
+    (restoredSession?.pendingReviewModules as ReviewModuleKey[] | undefined) ?? [],
+  )
+  const [completedReviewModules, setCompletedReviewModules] = useState<ReviewModuleKey[]>(
+    (restoredSession?.completedReviewModules as ReviewModuleKey[] | undefined) ?? [],
+  )
+  const [completedReviewPacketIds, setCompletedReviewPacketIds] = useState<string[]>(
+    restoredSession?.completedReviewPacketIds ?? [],
+  )
+  const [reviewProgress, setReviewProgress] = useState<ReviewProgress | null>(
+    (restoredSession?.reviewProgress as ReviewProgress | null | undefined) ?? null,
+  )
+  const [pendingPriorArtSearchEnabled, setPendingPriorArtSearchEnabled] = useState(restoredSession?.pendingPriorArtSearchEnabled ?? false)
+  const [sourceOpenError, setSourceOpenError] = useState('')
+  const [diagnosticCopied, setDiagnosticCopied] = useState(false)
   const [isSearchCostConfirmOpen, setIsSearchCostConfirmOpen] = useState(false)
   const [status, setStatus] = useState<'idle' | 'planning' | 'loading-files' | 'loading-models' | 'connecting-retrieval' | 'reviewing'>('idle')
-  const [error, setError] = useState('')
+  const [error, setError] = useState(restoredSession?.wasInterrupted
+    ? '上次审查运行时界面被重新加载；已恢复检索方案、调用轨迹和阶段结果。未完成的网络请求需要重新点击“开始辅助审查”继续。'
+    : '')
   const lastAutoToolLoadRef = useRef('')
 
   const profile = activeProfile(settings)
@@ -119,6 +173,72 @@ export default function LlmReviewDialog({
     () => sortReviewFindings(findings, findingSort, patentText),
     [findingSort, findings, patentText],
   )
+  const reviewProgressLabel = reviewProgress
+    ? formatReviewProgress(reviewProgress)
+    : '正在根据已选外部证据生成审查卡片，请稍候……'
+
+  useEffect(() => {
+    saveLlmReviewSession(window.sessionStorage, reviewSessionKey, {
+      manualField,
+      fieldChoice,
+      modules,
+      scope,
+      comparisonDocuments,
+      technicalSearchEnabled,
+      priorArtSearchEnabled,
+      technicalSearchPlan,
+      technicalSearchPlanConfirmed,
+      priorArtSearchPlan,
+      priorArtSearchPlanConfirmed,
+      technicalResearchTrace,
+      priorArtResearchTrace,
+      technicalResearchSummary,
+      priorArtResearchSummary,
+      technicalFactBundle,
+      selectedTechnicalFactIds,
+      findingSort,
+      priorArtCandidates,
+      selectedPriorArtId,
+      pendingTechnicalEvidence,
+      pendingPriorArtEvidence,
+      pendingReviewModules,
+      completedReviewModules,
+      completedReviewPacketIds,
+      reviewProgress,
+      pendingPriorArtSearchEnabled,
+      status,
+    })
+  }, [
+    comparisonDocuments,
+    completedReviewModules,
+    completedReviewPacketIds,
+    fieldChoice,
+    findingSort,
+    manualField,
+    modules,
+    pendingPriorArtEvidence,
+    pendingPriorArtSearchEnabled,
+    pendingReviewModules,
+    pendingTechnicalEvidence,
+    priorArtCandidates,
+    priorArtResearchSummary,
+    priorArtResearchTrace,
+    priorArtSearchEnabled,
+    priorArtSearchPlan,
+    priorArtSearchPlanConfirmed,
+    reviewSessionKey,
+    reviewProgress,
+    scope,
+    selectedPriorArtId,
+    selectedTechnicalFactIds,
+    status,
+    technicalFactBundle,
+    technicalResearchSummary,
+    technicalResearchTrace,
+    technicalSearchEnabled,
+    technicalSearchPlan,
+    technicalSearchPlanConfirmed,
+  ])
 
   function persistSettings() {
     if (rememberSettings) {
@@ -131,12 +251,23 @@ export default function LlmReviewDialog({
   }
 
   async function openExternal(url: string) {
-    if (!url) return
+    if (!url) return false
     try {
       if (window.patentReader?.openExternalUrl) await window.patentReader.openExternalUrl(url)
       else window.open(url, '_blank', 'noopener,noreferrer')
+      return true
     } catch (reason) {
-      setError(`无法打开默认浏览器：${reason instanceof Error ? reason.message : String(reason)}`)
+      const message = `无法打开默认浏览器：${reason instanceof Error ? reason.message : String(reason)}`
+      setError(message)
+      return false
+    }
+  }
+
+  async function openTechnicalFactSource(url: string) {
+    setSourceOpenError('')
+    const opened = await openExternal(url)
+    if (!opened) {
+      setSourceOpenError('该来源地址无法交给默认浏览器打开。请检查浏览器关联设置，或取消采用该证据。')
     }
   }
 
@@ -289,7 +420,7 @@ export default function LlmReviewDialog({
     }
   }
 
-  async function generateSearchPlan() {
+  async function generateSearchPlan(intent: 'technical-facts' | 'prior-art') {
     if (!profile.apiKey.trim() || !profile.endpoint.trim() || !profile.model.trim()) {
       setError('请先完整填写LLM接口设置。')
       return
@@ -297,7 +428,9 @@ export default function LlmReviewDialog({
     setStatus('planning')
     setError('')
     try {
-      const messages = buildSearchPlanMessages(technicalField, claimsText)
+      const messages = intent === 'technical-facts'
+        ? buildTechnicalFactPlanMessages(technicalField, patentText)
+        : buildSearchPlanMessages(technicalField, claimsText)
       const content = await complete(
         llmProviderLabels[settings.provider],
         profile.endpoint,
@@ -305,10 +438,15 @@ export default function LlmReviewDialog({
         profile.model,
         messages.system,
         messages.user,
-        '生成检索方案',
+        intent === 'technical-facts' ? '生成技术事实检索方案' : '生成候选对比文件检索方案',
       )
-      setSearchPlan(content)
-      setSearchPlanConfirmed(false)
+      if (intent === 'technical-facts') {
+        setTechnicalSearchPlan(content)
+        setTechnicalSearchPlanConfirmed(false)
+      } else {
+        setPriorArtSearchPlan(content)
+        setPriorArtSearchPlanConfirmed(false)
+      }
       persistSettings()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
@@ -319,38 +457,85 @@ export default function LlmReviewDialog({
 
   async function finishReview(
     reviewModules: ReviewModuleKey[],
-    searchEvidence: string,
+    technicalEvidence: string,
+    priorArtSearchEvidence: string,
     networkPriorArtEnabled: boolean,
     selectedClosestPriorArt: PriorArtCandidate | null,
+    initialCompletedModules: ReviewModuleKey[] = [],
+    initialCompletedPacketIds: string[] = [],
+    initialFindings: LlmReviewFinding[] = [],
   ) {
-    const messages = buildReviewMessages({
-      modules: reviewModules,
-      scope,
-      technicalField,
-      patentText,
-      claimsText,
-      comparisonDocuments,
-      searchEvidence,
-      allowPriorArtNetworkSearch: networkPriorArtEnabled,
-      selectedClosestPriorArt,
-    })
-    const content = await complete(
-      llmProviderLabels[settings.provider],
-      profile.endpoint,
-      profile.apiKey,
-      profile.model,
-      messages.system,
-      messages.user,
-      '专利辅助审查',
-    )
-    const nextFindings = parseReviewFindings(content, reviewModules)
+    const allPackets = createReviewWorkPackets(reviewModules, claimsText)
+    const completedPacketIds = new Set(initialCompletedPacketIds)
+    for (const module of initialCompletedModules) {
+      allPackets.filter((packet) => packet.module === module).forEach((packet) => completedPacketIds.add(packet.id))
+    }
+    const reviewPackets = remainingReviewPackets(allPackets, [...completedPacketIds])
+    let nextFindings = [...initialFindings]
+    let completedModules = completedModulesForPackets(allPackets, [...completedPacketIds]) as ReviewModuleKey[]
     const metadata = {
       technicalField,
       provider: settings.provider === 'custom' ? profile.interfaceName || '自定义接口' : llmProviderLabels[settings.provider],
       model: profile.model,
       generatedAt: new Date().toISOString(),
     }
-    onFindingsChange(nextFindings, metadata)
+    if (!reviewPackets.length) {
+      onNotice(`所选 ${reviewModules.length} 个审查模块均已完成，共保留 ${nextFindings.length} 张审查卡片。`)
+      return
+    }
+    for (const packet of reviewPackets) {
+      const packetIndex = allPackets.findIndex((candidate) => candidate.id === packet.id)
+      const technicalBatch = packet.module === 'technical'
+      const priorArtBatch = packet.module === 'priorArt'
+      setReviewProgress({
+        current: packetIndex + 1,
+        total: allPackets.length,
+        moduleName: packet.title,
+        completed: completedPacketIds.size,
+        generatedCards: nextFindings.length,
+      })
+      onNotice(`正在审查 ${packetIndex + 1}/${allPackets.length}：${packet.title}`)
+      const messages = buildReviewMessages({
+        modules: [packet.module],
+        scope,
+        technicalField,
+        patentText,
+        claimsText,
+        comparisonDocuments,
+        technicalEvidence: technicalBatch ? technicalEvidence : '',
+        priorArtSearchEvidence: priorArtBatch ? priorArtSearchEvidence : '',
+        allowPriorArtNetworkSearch: priorArtBatch && networkPriorArtEnabled,
+        selectedClosestPriorArt: priorArtBatch ? selectedClosestPriorArt : null,
+        workPacket: packet,
+      })
+      const content = await complete(
+        llmProviderLabels[settings.provider],
+        profile.endpoint,
+        profile.apiKey,
+        profile.model,
+        messages.system,
+        messages.user,
+        `${packet.title}独立审查`,
+      )
+      const batchFindings = parseReviewFindings(content, [packet.module])
+      nextFindings = mergeReviewFindings(nextFindings, batchFindings)
+      completedPacketIds.add(packet.id)
+      completedModules = completedModulesForPackets(allPackets, [...completedPacketIds]) as ReviewModuleKey[]
+      setCompletedReviewPacketIds([...completedPacketIds])
+      setCompletedReviewModules([...completedModules])
+      setReviewProgress({
+        current: packetIndex + 1,
+        total: allPackets.length,
+        moduleName: packet.title,
+        completed: completedPacketIds.size,
+        generatedCards: nextFindings.length,
+      })
+      onFindingsChange([...nextFindings], metadata)
+      const resultCopy = batchFindings.length
+        ? `生成 ${batchFindings.length} 张`
+        : '未发现需要生成卡片的问题'
+      onNotice(`已完成 ${packetIndex + 1}/${allPackets.length}：${packet.title}，${resultCopy}；累计 ${nextFindings.length} 张。`)
+    }
     onNotice(`LLM审查完成：生成 ${nextFindings.length} 条审查卡片，请逐条确认是否采纳。`)
   }
 
@@ -378,10 +563,156 @@ export default function LlmReviewDialog({
     void runReview()
   }
 
+  async function loadResearchTools() {
+    if (!window.patentReader?.retrievalListTools || !window.patentReader?.retrievalCallTool || !window.patentReader?.llmAgentTurn) {
+      throw new Error('当前桌面后端尚未加载LLM检索代理，请重启工具。')
+    }
+    let tools = retrievalTools
+    if (!tools.length) {
+      const listed = await window.patentReader.retrievalListTools({
+        provider: retrieval.provider,
+        endpoint: retrievalProfile.endpoint,
+        apiKey: retrievalProfile.apiKey,
+        clientSecret: retrievalProfile.clientSecret,
+        headersJson: retrievalProfile.headersJson,
+      })
+      tools = listed.tools
+      setMcpTools((current) => ({ ...current, [retrieval.provider]: tools }))
+    }
+    const availableNames = new Set(tools.map((tool) => tool.name))
+    const configuredNames = retrievalProfile.allowedToolNames.filter((name) => availableNames.has(name))
+    const allowedToolNames = configuredNames.length ? configuredNames : tools.map((tool) => tool.name)
+    setRetrieval((current) => updateRetrievalProfile(current, current.provider, { allowedToolNames }))
+    return { tools: tools as ResearchTool[], allowedToolNames }
+  }
+
+  async function executeResearch(
+    intent: 'technical-facts' | 'prior-art',
+    confirmedSearchPlan: string,
+  ) {
+    const { tools, allowedToolNames } = await loadResearchTools()
+    const effectiveAllowedToolNames = intent === 'technical-facts'
+      ? selectTechnicalFactToolNames(tools, allowedToolNames)
+      : allowedToolNames
+    if (intent === 'technical-facts' && !effectiveAllowedToolNames.length) {
+      throw new Error('当前服务没有可用于技术事实核验的通用网页搜索/正文读取工具。请改用智谱 Web Search，或配置具有通用搜索能力的自定义 MCP。')
+    }
+    if (intent === 'technical-facts') {
+      setTechnicalResearchTrace([])
+      setTechnicalResearchSummary('')
+    } else {
+      setPriorArtResearchTrace([])
+      setPriorArtResearchSummary('')
+    }
+    const result = await runMcpResearchAgent({
+      intent,
+      technicalField,
+      confirmedSearchPlan,
+      claimsText,
+      patentText,
+      tools,
+      allowedToolNames: effectiveAllowedToolNames,
+      maxSteps: retrievalProfile.maxSteps,
+      ...(intent === 'technical-facts' ? technicalFactResearchBudget : {}),
+    }, {
+      turn: async (messages, agentTools) => window.patentReader!.llmAgentTurn!({
+        provider: llmProviderLabels[settings.provider],
+        endpoint: profile.endpoint,
+        apiKey: profile.apiKey,
+        model: profile.model,
+        purpose: intent === 'technical-facts' ? '工程技术事实迭代检索' : '专利现有技术迭代检索',
+        messages: messages as PatentLlmAgentMessage[],
+        tools: agentTools,
+      }),
+      callTool: async (toolName, argumentsValue) => {
+        const response = await window.patentReader!.retrievalCallTool!({
+          provider: retrieval.provider,
+          endpoint: retrievalProfile.endpoint,
+          apiKey: retrievalProfile.apiKey,
+          clientSecret: retrievalProfile.clientSecret,
+          headersJson: retrievalProfile.headersJson,
+          searchEngine: retrievalProfile.searchEngine,
+          count: intent === 'technical-facts' ? Math.min(retrievalProfile.count, 5) : retrievalProfile.count,
+          toolName,
+          arguments: argumentsValue,
+        })
+        return response.content
+      },
+      onProgress: (entry) => {
+        if (intent === 'technical-facts') {
+          setTechnicalResearchTrace((current) => [...current, entry])
+        } else {
+          setPriorArtResearchTrace((current) => [...current, entry])
+        }
+      },
+    })
+    if (intent === 'technical-facts') setTechnicalResearchSummary(result.evidence)
+    else setPriorArtResearchSummary(result.evidence)
+    return result
+  }
+
+  async function runPriorArtAndFinish(
+    reviewModules: ReviewModuleKey[],
+    technicalEvidence: string,
+    enablePriorArtSearch: boolean,
+    initialCompletedModules: ReviewModuleKey[] = [],
+    initialCompletedPacketIds: string[] = [],
+    initialFindings: LlmReviewFinding[] = [],
+  ) {
+    let priorArtEvidence = ''
+    if (enablePriorArtSearch) {
+      const result = await executeResearch('prior-art', priorArtSearchPlan)
+      priorArtEvidence = `检索服务：${retrievalProviderLabels[retrieval.provider]}
+检索方式：LLM自主选择并连续调用候选专利检索/详情工具
+检索边界：联网结果与用户上传文件共同形成候选池；公开日、全文和法律地位仍须人工复核
+工具调用次数：${result.toolCallCount}
+${result.evidence}`
+      onNotice(`现有技术检索完成：LLM调用工具 ${result.toolCallCount} 次，正在整理候选对比文件。`)
+    }
+    if (reviewModules.includes('priorArt')) {
+      const candidates = await rankPriorArtCandidates(priorArtEvidence)
+      if (enablePriorArtSearch) {
+        setPriorArtCandidates(candidates)
+        setSelectedPriorArtId(candidates[0].id)
+        setPendingTechnicalEvidence(technicalEvidence)
+        setPendingPriorArtEvidence(priorArtEvidence)
+        setPendingReviewModules(reviewModules)
+        onNotice(`检索完成：整理出 ${candidates.length} 项候选对比文件，请选择最接近现有技术后继续。`)
+        return
+      }
+      await finishReview(
+        reviewModules,
+        technicalEvidence,
+        priorArtEvidence,
+        false,
+        candidates[0],
+        initialCompletedModules,
+        initialCompletedPacketIds,
+        initialFindings,
+      )
+      return
+    }
+    await finishReview(
+      reviewModules,
+      technicalEvidence,
+      priorArtEvidence,
+      false,
+      null,
+      initialCompletedModules,
+      initialCompletedPacketIds,
+      initialFindings,
+    )
+  }
+
   async function runReview(options: { disableNetwork?: boolean } = {}) {
     setError('')
-    const effectiveSearchEnabled = options.disableNetwork ? false : searchEnabled
-    const effectivePriorArtSearchEnabled = options.disableNetwork ? false : priorArtSearchEnabled
+    const effectiveTechnicalSearchEnabled = !options.disableNetwork
+      && technicalSearchEnabled
+      && selectedModules.includes('technical')
+    const effectivePriorArtSearchEnabled = !options.disableNetwork
+      && priorArtSearchEnabled
+      && selectedModules.includes('priorArt')
+    const effectiveSearchEnabled = effectiveTechnicalSearchEnabled || effectivePriorArtSearchEnabled
     const effectiveModules = options.disableNetwork && comparisonDocuments.length === 0
       ? selectedModules.filter((module) => module !== 'priorArt')
       : selectedModules
@@ -423,93 +754,81 @@ export default function LlmReviewDialog({
         setError('请填写EPO OPS Consumer Key和Consumer Secret。')
         return
       }
-      if (!searchPlan.trim() || !searchPlanConfirmed) {
-        setError('请先生成或填写检索方案，并勾选“已确认”。')
+      if (effectiveTechnicalSearchEnabled && !retrievalProviderSupportsTechnicalFacts(retrieval.provider)) {
+        setError('技术事实检索需要智谱 Web Search，或具有通用网页搜索/正文读取能力的自定义 MCP。智慧芽和 EPO 仅用于候选对比文件检索。')
+        return
+      }
+      if (effectiveTechnicalSearchEnabled && (!technicalSearchPlan.trim() || !technicalSearchPlanConfirmed)) {
+        setError('请先生成或填写“技术事实检索方案”，并勾选确认。')
+        return
+      }
+      if (effectivePriorArtSearchEnabled && (!priorArtSearchPlan.trim() || !priorArtSearchPlanConfirmed)) {
+        setError('请先生成或填写“候选对比文件检索方案”，并勾选确认。')
         return
       }
     }
+    setCompletedReviewModules([])
+    setCompletedReviewPacketIds([])
+    setReviewProgress(null)
+    setPendingReviewModules([])
+    setDiagnosticCopied(false)
+    onFindingsChange([], {
+      technicalField,
+      provider: settings.provider === 'custom' ? profile.interfaceName || '自定义接口' : llmProviderLabels[settings.provider],
+      model: profile.model,
+      generatedAt: new Date().toISOString(),
+    })
     setStatus('reviewing')
     try {
       persistSettings()
-      let searchEvidence = ''
-      if (effectiveSearchEnabled) {
-        if (!window.patentReader?.retrievalListTools || !window.patentReader?.retrievalCallTool || !window.patentReader?.llmAgentTurn) {
-          throw new Error('当前桌面后端尚未加载LLM检索代理，请重启工具。')
+      if (effectiveTechnicalSearchEnabled) {
+        const result = await executeResearch('technical-facts', technicalSearchPlan)
+        const bundle = parseTechnicalFactEvidence(result.evidence)
+        if (!bundle.items.length) {
+          throw new Error('技术事实检索未能整理出可确认的证据项，请调整检索方案或更换通用检索服务后重试。')
         }
-        let tools = retrievalTools
-        if (!tools.length) {
-          const listed = await window.patentReader.retrievalListTools({
-            provider: retrieval.provider,
-            endpoint: retrievalProfile.endpoint,
-            apiKey: retrievalProfile.apiKey,
-            clientSecret: retrievalProfile.clientSecret,
-            headersJson: retrievalProfile.headersJson,
-          })
-          tools = listed.tools
-          setMcpTools((current) => ({ ...current, [retrieval.provider]: tools }))
-        }
-        const availableNames = new Set(tools.map((tool) => tool.name))
-        const configuredNames = retrievalProfile.allowedToolNames.filter((name) => availableNames.has(name))
-        const allowedToolNames = configuredNames.length ? configuredNames : tools.map((tool) => tool.name)
-        setRetrieval((current) => updateRetrievalProfile(current, current.provider, { allowedToolNames }))
-        setResearchTrace([])
-        setResearchSummary('')
-        const result = await runMcpResearchAgent({
-          technicalField,
-          confirmedSearchPlan: searchPlan,
-          claimsText,
-          tools: tools as ResearchTool[],
-          allowedToolNames,
-          maxSteps: retrievalProfile.maxSteps,
-        }, {
-          turn: async (messages, agentTools) => window.patentReader!.llmAgentTurn!({
-            provider: llmProviderLabels[settings.provider],
-            endpoint: profile.endpoint,
-            apiKey: profile.apiKey,
-            model: profile.model,
-            purpose: '专利MCP迭代检索',
-            messages: messages as PatentLlmAgentMessage[],
-            tools: agentTools,
-          }),
-          callTool: async (toolName, argumentsValue) => {
-            const response = await window.patentReader!.retrievalCallTool!({
-              provider: retrieval.provider,
-              endpoint: retrievalProfile.endpoint,
-              apiKey: retrievalProfile.apiKey,
-              clientSecret: retrievalProfile.clientSecret,
-              headersJson: retrievalProfile.headersJson,
-              searchEngine: retrievalProfile.searchEngine,
-              count: retrievalProfile.count,
-              toolName,
-              arguments: argumentsValue,
-            })
-            return response.content
-          },
-          onProgress: (entry) => setResearchTrace((current) => [...current, entry]),
-        })
-        setResearchSummary(result.evidence)
-        onNotice(`MCP迭代检索完成：LLM调用工具 ${result.toolCallCount} 次，已形成候选对比文件证据。`)
-        searchEvidence = `检索服务：${retrievalProviderLabels[retrieval.provider]}
-检索方式：LLM自主选择并连续调用专利检索/详情工具
-检索边界：${effectivePriorArtSearchEnabled ? '联网结果与用户上传文件共同形成候选池，由用户选定最接近现有技术；联网结果仍须人工复核公开日、全文和法律地位' : '仅核验技术事实，不把联网结果作为正式对比文件'}
-工具调用次数：${result.toolCallCount}
-${result.evidence}`
+        setSourceOpenError('')
+        setTechnicalFactBundle(bundle)
+        setSelectedTechnicalFactIds(bundle.items.map((item) => item.id))
+        setPendingReviewModules(effectiveModules)
+        setPendingPriorArtSearchEnabled(effectivePriorArtSearchEnabled)
+        onNotice(`技术事实检索完成：取得 ${bundle.items.length} 项可核验证据，请人工确认后继续。`)
+        return
       }
+      await runPriorArtAndFinish(effectiveModules, '', effectivePriorArtSearchEnabled)
+    } catch (reason) {
+      setError(`审查未完成：${reason instanceof Error ? reason.message : String(reason)}`)
+    } finally {
+      setStatus('idle')
+    }
+  }
 
-      if (effectiveModules.includes('priorArt')) {
-        const candidates = await rankPriorArtCandidates(effectivePriorArtSearchEnabled ? searchEvidence : '')
-        if (effectivePriorArtSearchEnabled) {
-          setPriorArtCandidates(candidates)
-          setSelectedPriorArtId(candidates[0].id)
-          setPendingSearchEvidence(searchEvidence)
-          setPendingReviewModules(effectiveModules)
-          onNotice(`检索完成：整理出 ${candidates.length} 项候选对比文件，请选择最接近现有技术后继续。`)
-          return
-        }
-        await finishReview(effectiveModules, searchEvidence, false, candidates[0])
-      } else {
-        await finishReview(effectiveModules, searchEvidence, false, null)
-      }
+  async function continueAfterTechnicalFactSelection() {
+    if (!technicalFactBundle) return
+    if (!selectedTechnicalFactIds.length) {
+      setError('请至少保留一项技术事实证据；不想使用联网证据时，可关闭弹窗并取消“检索技术事实”。')
+      return
+    }
+    const technicalEvidence = `检索服务：${retrievalProviderLabels[retrieval.provider]}
+检索方式：围绕基本理论、工程做法、参数边界和失效风险进行通用网页检索
+检索边界：仅用于判断主文本的技术命题及成立条件，不作为新颖性或创造性的对比文件
+${formatTechnicalFactEvidence(technicalFactBundle, selectedTechnicalFactIds)}`
+    setStatus('reviewing')
+    setError('')
+    setDiagnosticCopied(false)
+    try {
+      await runPriorArtAndFinish(
+        pendingReviewModules,
+        technicalEvidence,
+        pendingPriorArtSearchEnabled,
+        completedReviewModules,
+        completedReviewPacketIds,
+        completedReviewPacketIds.length || completedReviewModules.length ? findings : [],
+      )
+      setTechnicalFactBundle(null)
+      setSelectedTechnicalFactIds([])
+      setPendingReviewModules([])
+      setPendingPriorArtSearchEnabled(false)
     } catch (reason) {
       setError(`审查未完成：${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
@@ -525,16 +844,58 @@ ${result.evidence}`
     }
     setStatus('reviewing')
     setError('')
+    setDiagnosticCopied(false)
     try {
-      await finishReview(pendingReviewModules, pendingSearchEvidence, true, selected)
+      await finishReview(
+        pendingReviewModules,
+        pendingTechnicalEvidence,
+        pendingPriorArtEvidence,
+        true,
+        selected,
+        completedReviewModules,
+        completedReviewPacketIds,
+        completedReviewPacketIds.length || completedReviewModules.length ? findings : [],
+      )
       setPriorArtCandidates([])
       setSelectedPriorArtId('')
-      setPendingSearchEvidence('')
+      setPendingTechnicalEvidence('')
+      setPendingPriorArtEvidence('')
       setPendingReviewModules([])
     } catch (reason) {
       setError(`审查未完成：${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
       setStatus('idle')
+    }
+  }
+
+  async function copyReviewDiagnostic() {
+    const diagnostic = buildReviewDiagnostic({
+      provider: settings.provider === 'custom' ? profile.interfaceName || '自定义接口' : llmProviderLabels[settings.provider],
+      model: profile.model,
+      error: error.replace(/^审查未完成：/, ''),
+      progress: reviewProgress,
+      completedModules: completedReviewModules,
+      completedPacketIds: completedReviewPacketIds,
+    })
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(diagnostic)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = diagnostic
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        const copied = document.execCommand('copy')
+        textarea.remove()
+        if (!copied) throw new Error('系统剪贴板拒绝了复制请求')
+      }
+      setDiagnosticCopied(true)
+      setSourceOpenError('')
+    } catch (reason) {
+      setDiagnosticCopied(false)
+      setSourceOpenError(`无法复制诊断信息：${reason instanceof Error ? reason.message : String(reason)}`)
     }
   }
 
@@ -547,6 +908,8 @@ ${result.evidence}`
       generatedAt: new Date().toISOString(),
     })
   }
+
+  if (!open) return null
 
   return <div className="llm-review-backdrop" onMouseDown={onClose}>
     <section className="llm-review-dialog" role="dialog" aria-modal="true" aria-labelledby="llm-review-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -585,8 +948,15 @@ ${result.evidence}`
 
           <section className="llm-setup-section">
             <h3><Search size={15} /> 联网检索（可选）</h3>
-            <label className="llm-check"><input type="checkbox" checked={technicalSearchEnabled} onChange={(event) => setTechnicalSearchEnabled(event.target.checked)} /> 检索技术事实</label>
-            <label className="llm-check"><input type="checkbox" checked={priorArtSearchEnabled} onChange={(event) => setPriorArtSearchEnabled(event.target.checked)} /> 补检潜在对比文件（与用户上传文件分开标记）</label>
+            <label className="llm-check"><input type="checkbox" checked={technicalSearchEnabled} onChange={(event) => {
+              setTechnicalSearchEnabled(event.target.checked)
+              if (event.target.checked) setModules((current) => ({ ...current, technical: true }))
+            }} /> 检索技术事实（基本理论、工程做法、参数边界与失效风险）</label>
+            <label className="llm-check"><input type="checkbox" checked={priorArtSearchEnabled} onChange={(event) => {
+              setPriorArtSearchEnabled(event.target.checked)
+              if (event.target.checked) setModules((current) => ({ ...current, priorArt: true }))
+            }} /> 补检潜在对比文件（仅用于新颖性与创造性）</label>
+            {technicalSearchEnabled && <p className="retrieval-note">技术事实检索不会寻找“相似专利”，其任务是核验主文本中的作用机理、通行做法、必要参数、成立条件和工程风险。需使用智谱 Web Search 或具有通用网页检索能力的自定义 MCP。</p>}
             {searchEnabled && <div className="retrieval-settings">
               <label className="span-2">检索服务
                 <select value={retrieval.provider} onChange={(event) => setRetrieval((current) => ({ ...current, provider: event.target.value as RetrievalProvider }))}>
@@ -646,16 +1016,27 @@ ${result.evidence}`
                   </label>)}
                 </div>}
               </details>
-              <label>最多工具调用轮次<input type="number" min="2" max="12" value={retrievalProfile.maxSteps} onChange={(event) => setRetrieval((current) => updateRetrievalProfile(current, current.provider, { maxSteps: Math.max(2, Math.min(12, Number(event.target.value) || 8)) }))} /></label>
-              <p className="retrieval-note">同一参数最多重复调用两次，达到轮次上限后自动整理已有证据。</p>
-              <div className="search-plan-heading"><strong>检索方案</strong><button type="button" onClick={() => { void generateSearchPlan() }} disabled={status !== 'idle'}>{status === 'planning' ? <LoaderCircle className="spin" size={13} /> : <Sparkles size={13} />} 由LLM生成</button></div>
-              <textarea value={searchPlan} onChange={(event) => { setSearchPlan(event.target.value); setSearchPlanConfirmed(false) }} placeholder="可手工填写或由LLM生成，再修改确认。" />
-              <label className="llm-check"><input type="checkbox" checked={searchPlanConfirmed} onChange={(event) => setSearchPlanConfirmed(event.target.checked)} /> 已检查并确认本次检索方案</label>
-              {researchTrace.length > 0 && <details className="retrieval-research-trace span-2" open>
-                <summary>LLM已调用 {researchTrace.length} 次检索工具</summary>
-                <ol>{researchTrace.map((entry, index) => <li key={`${entry.step}-${entry.toolName}-${index}`}><strong>{entry.toolName}</strong><code>{JSON.stringify(entry.arguments)}</code><small>{entry.resultPreview}</small></li>)}</ol>
+              <label>最多检索对话轮次<input type="number" min="2" max="12" value={retrievalProfile.maxSteps} onChange={(event) => setRetrieval((current) => updateRetrievalProfile(current, current.provider, { maxSteps: Math.max(2, Math.min(12, Number(event.target.value) || 8)) }))} /></label>
+              {technicalSearchEnabled && <>
+                <div className="search-plan-heading"><strong>技术事实检索方案</strong><button type="button" onClick={() => { void generateSearchPlan('technical-facts') }} disabled={status !== 'idle'}>{status === 'planning' ? <LoaderCircle className="spin" size={13} /> : <Sparkles size={13} />} 由LLM生成</button></div>
+                <textarea value={technicalSearchPlan} onChange={(event) => { setTechnicalSearchPlan(event.target.value); setTechnicalSearchPlanConfirmed(false) }} placeholder="围绕需要核验的技术命题，填写理论、工程做法、参数边界和权威来源方向。" />
+                <label className="llm-check"><input type="checkbox" checked={technicalSearchPlanConfirmed} onChange={(event) => setTechnicalSearchPlanConfirmed(event.target.checked)} /> 已检查并确认技术事实检索方案</label>
+              </>}
+              {priorArtSearchEnabled && <>
+                <div className="search-plan-heading"><strong>候选对比文件检索方案</strong><button type="button" onClick={() => { void generateSearchPlan('prior-art') }} disabled={status !== 'idle'}>{status === 'planning' ? <LoaderCircle className="spin" size={13} /> : <Sparkles size={13} />} 由LLM生成</button></div>
+                <textarea value={priorArtSearchPlan} onChange={(event) => { setPriorArtSearchPlan(event.target.value); setPriorArtSearchPlanConfirmed(false) }} placeholder="围绕核心发明构思、必要技术特征、同义词和分类号填写候选专利检索方案。" />
+                <label className="llm-check"><input type="checkbox" checked={priorArtSearchPlanConfirmed} onChange={(event) => setPriorArtSearchPlanConfirmed(event.target.checked)} /> 已检查并确认候选对比文件检索方案</label>
+              </>}
+              {technicalResearchTrace.length > 0 && <details className="retrieval-research-trace span-2" open>
+                <summary>技术事实检索已调用 {technicalResearchTrace.length} 次工具</summary>
+                <ol>{technicalResearchTrace.map((entry, index) => <li key={`fact-${entry.step}-${entry.toolName}-${index}`}><strong>{entry.toolName}</strong><code>{JSON.stringify(entry.arguments)}</code><small>{entry.resultPreview}</small></li>)}</ol>
               </details>}
-              {researchSummary && <details className="retrieval-research-summary span-2"><summary>查看候选对比文件检索总结</summary><pre>{researchSummary}</pre></details>}
+              {technicalResearchSummary && <details className="retrieval-research-summary span-2"><summary>查看技术事实证据总结</summary><pre>{technicalResearchSummary}</pre></details>}
+              {priorArtResearchTrace.length > 0 && <details className="retrieval-research-trace span-2" open>
+                <summary>候选对比文件检索已调用 {priorArtResearchTrace.length} 次工具</summary>
+                <ol>{priorArtResearchTrace.map((entry, index) => <li key={`prior-${entry.step}-${entry.toolName}-${index}`}><strong>{entry.toolName}</strong><code>{JSON.stringify(entry.arguments)}</code><small>{entry.resultPreview}</small></li>)}</ol>
+              </details>}
+              {priorArtResearchSummary && <details className="retrieval-research-summary span-2"><summary>查看候选对比文件检索总结</summary><pre>{priorArtResearchSummary}</pre></details>}
             </div>}
           </section>
 
@@ -707,6 +1088,66 @@ ${result.evidence}`
           </div>
         </section>
       </div>}
+      {technicalFactBundle && <div className="llm-step-backdrop" onMouseDown={(event) => event.stopPropagation()}>
+        <section className="technical-fact-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="technical-fact-selection-title">
+          <header>
+            <div><span className="eyebrow">技术事实检索已完成 · 人工确认</span><h3 id="technical-fact-selection-title">选择用于技术审查的外部证据</h3></div>
+            <button type="button" onClick={() => {
+              setTechnicalFactBundle(null)
+              setSelectedTechnicalFactIds([])
+              setPendingReviewModules([])
+              setPendingPriorArtSearchEnabled(false)
+              setSourceOpenError('')
+            }} aria-label="关闭技术事实证据选择"><X size={18} /></button>
+          </header>
+          <p className="technical-fact-selection-note">这些结果只用于判断主文本中的技术命题、成立条件与工程风险，不作为新颖性或创造性的对比文件。请取消不可靠或无关的证据。</p>
+          <div className="technical-fact-selection-body">
+            {sourceOpenError && <div className="technical-fact-source-error"><AlertTriangle size={14} />{sourceOpenError}</div>}
+            {error && <div className="technical-fact-review-error">
+              <AlertTriangle size={18} />
+              <div>
+                <strong>后续辅助审查未完成</strong>
+                <span>{error.replace(/^审查未完成：/, '')}</span>
+                <small>已保留本次智谱检索结果、证据选择以及已完成的 {findings.length} 张审查卡片。再次点击下方按钮只会重试后续审查，不会重新进行技术事实检索。</small>
+                <button type="button" className="copy-review-diagnostic" onClick={() => { void copyReviewDiagnostic() }}>
+                  {diagnosticCopied ? <Check size={13} /> : <BookOpenText size={13} />}
+                  {diagnosticCopied ? '诊断信息已复制' : '复制诊断信息'}
+                </button>
+              </div>
+            </div>}
+            {status === 'reviewing' && <div className="technical-fact-review-progress">
+              <LoaderCircle className="spin" size={17} />
+              <span>{reviewProgressLabel}</span>
+            </div>}
+            {technicalFactBundle.summary && <div className="technical-fact-summary">{technicalFactBundle.summary}</div>}
+            <div className="technical-fact-list">
+              {technicalFactBundle.items.map((item) => {
+                const checked = selectedTechnicalFactIds.includes(item.id)
+                return <article key={item.id} className={checked ? 'selected' : ''}>
+                  <header>
+                    <label><input type="checkbox" checked={checked} onChange={(event) => setSelectedTechnicalFactIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /><span>{checked ? '保留' : '不采用'}</span></label>
+                    <div><span>{item.category}</span><strong>{item.verdict}</strong></div>
+                  </header>
+                  <h4>{item.proposition}</h4>
+                  {item.patentQuote && <blockquote>“{item.patentQuote}”</blockquote>}
+                  <p>{item.analysis}</p>
+                  {item.missingConditions.length > 0 && <p className="technical-fact-conditions"><strong>缺少或限制条件：</strong>{item.missingConditions.join('；')}</p>}
+                  <div className="technical-fact-risk"><strong>技术风险</strong>{item.risk}</div>
+                  {item.sources.length > 0 && <details><summary>查看 {item.sources.length} 项来源</summary>{item.sources.map((source, index) => <div key={`${item.id}-source-${index}`}><strong>{source.title}</strong><small>{source.sourceLevel}</small>{source.url && <button type="button" className="llm-link-button" onClick={() => { void openTechnicalFactSource(source.url) }}>打开来源 <ExternalLink size={11} /></button>}<p>{source.excerpt}</p></div>)}</details>}
+                </article>
+              })}
+            </div>
+            {technicalFactBundle.uncoveredQuestions.length > 0 && <details className="technical-fact-uncovered"><summary>尚未取得充分证据的事项</summary><ul>{technicalFactBundle.uncoveredQuestions.map((question) => <li key={question}>{question}</li>)}</ul></details>}
+          </div>
+          <footer>
+            <span><ShieldCheck size={14} /> 已选 {selectedTechnicalFactIds.length}/{technicalFactBundle.items.length} 项；未选内容不会送入后续审查。</span>
+            <button type="button" className="primary-button" onClick={() => { void continueAfterTechnicalFactSelection() }} disabled={status !== 'idle'}>
+              {status === 'reviewing' ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
+              {status === 'reviewing' ? '正在生成审查卡片…' : error ? '重试后续审查' : '确认并继续辅助审查'}
+            </button>
+          </footer>
+        </section>
+      </div>}
       {priorArtCandidates.length > 0 && <div className="llm-step-backdrop" onMouseDown={(event) => event.stopPropagation()}>
         <section className="prior-art-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="prior-art-selection-title">
           <header>
@@ -714,7 +1155,8 @@ ${result.evidence}`
             <button type="button" onClick={() => {
               setPriorArtCandidates([])
               setSelectedPriorArtId('')
-              setPendingSearchEvidence('')
+              setPendingTechnicalEvidence('')
+              setPendingPriorArtEvidence('')
               setPendingReviewModules([])
             }} aria-label="关闭候选对比文件选择"><X size={18} /></button>
           </header>
