@@ -2,18 +2,22 @@
 
 专利阅研是一款面向专利代理师、企业知识产权工程师的 Windows 本地专利阅读辅助工具。它的核心目标是：在阅读本地 DOCX/PDF 专利稿件时，快速建立“说明书、权利要求书、附图、附图标记”之间的对应关系，并把审阅意见直接批注回修订版文件中。
 
-当前 GitHub 正式发布版本：`v1.0.0`
+具体使用方法可以参考“知识产钱论”公众号
 
 ## 下载与安装
 
 进入发布页下载：
 
-[https://github.com/talenlin/Patent-Review-Tool/releases/tag/v1.0.0](https://github.com/talenlin/Patent-Review-Tool/releases/tag/v1.0.0)
+[https://github.com/talenlin/Patent-Review-Tool/releases](https://github.com/talenlin/Patent-Review-Tool/releases)
+
+该软件存在两个版本分支：
+v1.x.x 基于纯本地化设计，完全本地运行（仅有OCR提供可选的在线OCR选项，使用在线OCR时仅上传附图）
+v2.x.x 集成了LLM核稿，可以接入大模型实现核稿分析，也可以接入部分MCP实现初步检索（须知“专利研阅”为了小型化，并未集成agent也未调用云端agent能力，因此检索能力并不及商业化智能检索，仅用作初步检索，请理性看待。）
 
 推荐下载方式：
 
-- 安装版：`PatentReviewTool_V1.0.0_x64_setup.exe`
-- 免安装版：`PatentReviewTool_V1.0.0_portable.zip`
+- 安装版：`PatentReviewTool_xxxx_x64_setup.exe`
+- 免安装版：`PatentReviewTool_xxxxx_portable.zip`
 
 如果只是快速试用，建议先下载免安装版，解压后直接运行即可。
 
