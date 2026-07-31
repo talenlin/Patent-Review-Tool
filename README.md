@@ -236,7 +236,8 @@ cargo tauri build
 ```
 
 ## 赏杯奶茶/公众号关注
-<img width="1280" height="1744" alt="6215f4981c17b708c0f083e4ffd5bd3c" src="https://github.com/user-attachments/assets/793cf448-ff3e-4c6a-9ca4-2f92828fc229" />
+<img width="344" height="479" alt="34ee281d-50ae-4018-bcb9-4a7d136fb776" src="https://github.com/user-attachments/assets/04e1fb40-f3c3-471f-8dc8-8df11d6d9012" />
+
 <img width="344" height="344" alt="qrcode_for_gh_403ca046c9d7_344" src="https://github.com/user-attachments/assets/bbcfa17e-cdb4-4ea6-ba20-773475ad35f8" />
 
 
