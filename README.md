@@ -235,6 +235,10 @@ cd ..\rust-v1\src-tauri
 cargo tauri build
 ```
 
-## 版本说明
+## 赏杯奶茶/公众号关注
+<img width="1280" height="1744" alt="6215f4981c17b708c0f083e4ffd5bd3c" src="https://github.com/user-attachments/assets/793cf448-ff3e-4c6a-9ca4-2f92828fc229" />
+<img width="344" height="344" alt="qrcode_for_gh_403ca046c9d7_344" src="https://github.com/user-attachments/assets/bbcfa17e-cdb4-4ea6-ba20-773475ad35f8" />
 
-`v1.0.0` 是当前首个正式 GitHub 发布版本，对应此前本地验证通过的 V1.2.4 功能状态。
+
+
+
