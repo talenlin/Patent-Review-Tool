@@ -43,14 +43,17 @@ function matchesDefinition(line: string, patterns: RegExp[]) {
 
 export function detectSections(text: string, markers: string[] = []): PatentSection[] {
   const lines = text.split(/\n+/).map(normaliseLine).filter(Boolean)
-  // Preserve empty page markers for PDF files so the marker index remains the
-  // actual one-based page number. DOCX header lists contain no empty entries.
+  // Each marker represents one logical page. Empty entries are retained so
+  // the marker index remains the one-based page number for both DOCX and PDF.
   const normalisedMarkers = markers.map(normaliseLine)
 
   return sectionDefinitions.map((definition) => {
     const headerIndex = normalisedMarkers.findIndex((marker) => matchesDefinition(marker, definition.patterns))
     const textIndex = lines.findIndex((line) => matchesDefinition(line, definition.patterns))
-    const start = headerIndex >= 0 ? headerIndex + 1 : textIndex >= 0 ? textIndex + 1 : null
+    // A section position is a page number, never a paragraph/title ordinal.
+    // For old files without any page anchors, retain the legacy best-effort
+    // detection so the user can still correct it manually.
+    const start = headerIndex >= 0 ? headerIndex + 1 : normalisedMarkers.length === 0 && textIndex >= 0 ? textIndex + 1 : null
     return {
       key: definition.key,
       label: definition.label,
@@ -71,7 +74,12 @@ function normaliseReferenceName(rawName: string) {
 
 const legendHeadingPattern = /^(?:附图标记(?:说明)?|附图编号说明|主要元件符号说明|图中标识|图中)\s*[：:]?/
 const legendBoundaryPattern = /^(?:具体实施方式|具体实施例|实施方式|实施例(?:一|二|三|四|五|六|七|八|九|十|\d+)?|工业实用性|权利要求书|说明书摘要|说明书附图)/
-const referenceTokenSource = '(?:[A-Za-z]?\\d{1,8}[A-Za-z]?|[A-Za-z])'
+const referenceTokenSource = '(?:[A-Za-z]?\\d{1,8}[A-Za-z]?|[A-Za-z]{1,12})'
+const tableLegendHeadingPattern = /^(?:主要元件符号说明|元件符号说明|主要元件符号)\s*[：:]?/
+
+function referenceTokens(value: string) {
+  return [...new Set(value.match(new RegExp(referenceTokenSource, 'g')) ?? [])]
+}
 
 function stripPatentParagraphNumber(line: string) {
   return line.replace(/^\s*\[\d{3,6}\]\s*/, '').trim()
@@ -83,7 +91,7 @@ function extractLegendText(text: string) {
   for (const rawLine of text.split(/\r?\n/)) {
     const line = stripPatentParagraphNumber(rawLine)
     if (!line) continue
-    const heading = line.match(legendHeadingPattern)
+    const heading = line.match(legendHeadingPattern) ?? line.match(tableLegendHeadingPattern)
     if (heading?.index !== undefined) {
       active = true
       const trailing = line.slice(heading.index + heading[0].length).trim()
@@ -111,6 +119,7 @@ export function extractLegendReferenceCandidates(text: string): ReferenceCandida
   const legendText = extractLegendText(text)
   if (!legendText) return []
   const candidates = new Map<string, ReferenceCandidate>()
+  const tableLegendIds = new Set<string>()
   const add = (rawName: string, rawNumber: string) => {
     const name = cleanLegendName(rawName)
     const number = rawNumber.trim()
@@ -134,7 +143,23 @@ export function extractLegendReferenceCandidates(text: string): ReferenceCandida
     for (const match of segment.matchAll(nameFirst)) add(match[1], match[2])
   }
 
-  return [...candidates.values()].sort((first, second) => (
+  // DOCX legend tables are represented as "feature<TAB>reference sign" rows.
+  // Add table rows after the prose pass so identical entries are de-duplicated
+  // while still receiving the highest-priority `fromLegend` flag.
+  for (const rawLine of legendText.split(/\r?\n/)) {
+    const cells = rawLine.split('\t').map((cell) => cell.trim()).filter(Boolean)
+    if (cells.length !== 2) continue
+    const name = cleanLegendName(cells[0])
+    for (const token of referenceTokens(cells[1])) {
+      if (!name || token === '0') continue
+      tableLegendIds.add(`${name}${token}`)
+      add(cells[0], token)
+    }
+  }
+
+  return [...candidates.values()]
+    .filter((candidate) => tableLegendIds.size === 0 || tableLegendIds.has(candidate.id))
+    .sort((first, second) => (
     first.number.localeCompare(second.number, 'zh-CN', { numeric: true })
     || first.name.localeCompare(second.name, 'zh-CN')
   ))
@@ -194,6 +219,59 @@ function wordXmlText(xml: string) {
     .join('\n')
 }
 
+function docxPageStartLines(documentXml: string) {
+  const document = new DOMParser().parseFromString(documentXml, 'application/xml')
+  const namespace = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+  const pages: string[][] = [[]]
+  const pageBreakValues = new Set(['nextPage', 'oddPage', 'evenPage'])
+
+  for (const paragraph of Array.from(document.getElementsByTagNameNS(namespace, 'p'))) {
+    const text = Array.from(paragraph.getElementsByTagNameNS(namespace, 't'))
+      .map((node) => node.textContent ?? '')
+      .join('')
+    if (text.trim()) pages.at(-1)?.push(text)
+
+    const renderedBreaks = paragraph.getElementsByTagNameNS(namespace, 'lastRenderedPageBreak').length
+    const explicitBreaks = Array.from(paragraph.getElementsByTagNameNS(namespace, 'br'))
+      .filter((node) => (node.getAttributeNS(namespace, 'type') ?? node.getAttribute('w:type')) === 'page').length
+    const sectionBreaks = Array.from(paragraph.getElementsByTagNameNS(namespace, 'sectPr'))
+      .filter((section) => Array.from(section.getElementsByTagNameNS(namespace, 'type'))
+        .some((node) => pageBreakValues.has(node.getAttributeNS(namespace, 'val') ?? node.getAttribute('w:val') ?? ''))).length
+    const breakCount = Math.max(renderedBreaks, explicitBreaks, sectionBreaks)
+    for (let index = 0; index < breakCount; index += 1) pages.push([])
+  }
+
+  return pages.map((page) => normaliseLine(page.find((line) => normaliseLine(line)) ?? ''))
+}
+
+function docxLegendTableText(documentXml: string) {
+  const document = new DOMParser().parseFromString(documentXml, 'application/xml')
+  const namespace = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+  const body = document.getElementsByTagNameNS(namespace, 'body')[0]
+  if (!body) return ''
+
+  let captureNextTable = false
+  const rows: string[] = []
+  for (const child of Array.from(body.children)) {
+    if (child.namespaceURI !== namespace) continue
+    if (child.localName === 'p') {
+      const text = Array.from(child.getElementsByTagNameNS(namespace, 't')).map((node) => node.textContent ?? '').join('')
+      const line = normaliseLine(text)
+      captureNextTable = legendHeadingPattern.test(line) || tableLegendHeadingPattern.test(line)
+      continue
+    }
+    if (child.localName !== 'tbl' || !captureNextTable) continue
+    for (const row of Array.from(child.getElementsByTagNameNS(namespace, 'tr'))) {
+      const cells = Array.from(row.getElementsByTagNameNS(namespace, 'tc'))
+        .map((cell) => normaliseLine(Array.from(cell.getElementsByTagNameNS(namespace, 't')).map((node) => node.textContent ?? '').join('')))
+        .filter(Boolean)
+      if (cells.length >= 2) rows.push(`${cells[0]}\t${cells[1]}`)
+    }
+    captureNextTable = false
+  }
+  return rows.join('\n')
+}
+
 export async function parseDocx(arrayBuffer: ArrayBuffer): Promise<ParsedDocument> {
   const [result, zip] = await Promise.all([
     mammoth.convertToHtml({ arrayBuffer }),
@@ -211,12 +289,16 @@ export async function parseDocx(arrayBuffer: ArrayBuffer): Promise<ParsedDocumen
     if (!xml) return ''
     return wordXmlText(xml)
   }))
-  const markers = headerTexts.map(normaliseLine).filter(Boolean)
+  const headerMarkers = headerTexts.map(normaliseLine)
+  const bodyPageMarkers = documentXml ? docxPageStartLines(documentXml) : []
+  const tableLegendText = documentXml ? docxLegendTableText(documentXml) : ''
+  const pageCount = Math.max(headerMarkers.length, bodyPageMarkers.length)
+  const markers = Array.from({ length: pageCount }, (_, index) => headerMarkers[index] || bodyPageMarkers[index] || '')
   return {
     html: result.value,
-    plainText: `${markers.join('\n')}\n${plainText}`.trim(),
+    plainText: `${markers.filter(Boolean).join('\n')}\n${plainText}${tableLegendText ? `\n主要元件符号说明：\n${tableLegendText}` : ''}`.trim(),
     markers,
-    pageCount: 0,
+    pageCount,
   }
 }
 

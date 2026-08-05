@@ -7,6 +7,7 @@ export type ClaimIssue = {
   highlightText: string
   kind: ClaimIssueKind
   severity: '重要' | '一般' | '提示'
+  conclusion: '缺乏引入' | '指代不清' | '多重引入' | '术语不一致' | '引用关系错误' | '范围跳变'
   message: string
   sources: Array<{ claimNumber: number; term: string; preamble: boolean }>
   paths: number[][]
@@ -240,13 +241,13 @@ function dependencyPaths(claimNumber: number, byNumber: Map<number, ParsedClaim>
 function issueMeta(kind: ClaimIssueKind, term: string, claimNumber: number) {
   switch (kind) {
     case 'absolute-missing':
-      return { severity: '重要' as const, message: `权利要求 ${claimNumber} 中“所述${term}”未找到可继承的首次引入，可能缺乏引用基础。` }
+      return { severity: '重要' as const, conclusion: '缺乏引入' as const, message: `权利要求 ${claimNumber} 中“所述${term}”未找到可继承的首次引入，可能缺乏引用基础。` }
     case 'ambiguous':
-      return { severity: '一般' as const, message: `权利要求 ${claimNumber} 中“所述${term}”对应多个前驱对象，指代不够明确。` }
+      return { severity: '一般' as const, conclusion: '多重引入' as const, message: `权利要求 ${claimNumber} 中“所述${term}”对应多个前驱对象，指代不够明确。` }
     case 'quantity-mismatch':
-      return { severity: '一般' as const, message: `权利要求 ${claimNumber} 中“所述${term}”与首次引入的数量表述不一致。` }
+      return { severity: '一般' as const, conclusion: '术语不一致' as const, message: `权利要求 ${claimNumber} 中“所述${term}”与首次引入的数量表述不一致。` }
     case 'preamble-only':
-      return { severity: '提示' as const, message: `权利要求 ${claimNumber} 中“所述${term}”仅能追溯到前序部分，建议确认不会不当限缩保护范围。` }
+      return { severity: '提示' as const, conclusion: '范围跳变' as const, message: `权利要求 ${claimNumber} 中“所述${term}”仅能追溯到前序部分，建议确认不会不当限缩保护范围。` }
   }
 }
 
@@ -302,6 +303,7 @@ export function analyzeClaimAntecedentBasis(text: string): ClaimAntecedentAnalys
         highlightText: reference.term,
         kind,
         severity: meta.severity,
+        conclusion: meta.conclusion,
         message: meta.message,
         sources: allSources.map((source) => ({ claimNumber: source.claimNumber ?? claim.number, term: source.term, preamble: source.preamble })),
         paths,

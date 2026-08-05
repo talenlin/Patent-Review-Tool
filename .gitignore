@@ -24,6 +24,7 @@ test/
 *.pdf
 *.xlsx
 *.png
+!app/src/assets/patent-reader-logo.png
 
 # Logs and local machine state
 *.log
@@ -31,3 +32,7 @@ test/
 .DS_Store
 .idea/
 .vscode/
+rust-v1/src-tauri/paddle-ocr/.runtime-build/
+rust-v1/src-tauri/paddle-ocr/.runtime-test/
+rust-v1/src-tauri/paddle-ocr/runtime/
+rust-v1/src-tauri/paddle-ocr/models/

@@ -1,4 +1,4 @@
-export type OcrProvider = 'local' | 'ocr-space' | 'google-vision' | 'paddle-ocr' | 'custom'
+export type OcrProvider = 'local' | 'paddle-local' | 'ocr-space' | 'google-vision' | 'paddle-ocr' | 'custom'
 
 export type OcrProfile = {
   apiKey: string
@@ -17,7 +17,8 @@ export type OcrSettings = OcrProfile & {
 }
 
 export const ocrProviderLabels: Record<OcrProvider, string> = {
-  local: '本机 OCR',
+  local: '本机 OCR（基础）',
+  'paddle-local': '本机 PaddleOCR 3（增强插件）',
   'ocr-space': 'OCR.Space',
   'google-vision': 'Google Cloud Vision',
   'paddle-ocr': 'PaddleOCR',
@@ -31,7 +32,8 @@ export const ocrProviderApiLinks: Partial<Record<OcrProvider, string>> = {
 }
 
 const defaultProfiles: Record<OcrProvider, OcrProfile> = {
-  local: { apiKey: '', endpoint: '', model: '', interfaceName: '本机 OCR' },
+  local: { apiKey: '', endpoint: '', model: '', interfaceName: '本机 OCR（基础）' },
+  'paddle-local': { apiKey: '', endpoint: '', model: 'PP-OCRv5 Mobile', interfaceName: '本机 PaddleOCR 3（增强插件）' },
   'ocr-space': { apiKey: '', endpoint: 'https://api.ocr.space/parse/image', model: 'OCREngine 2', interfaceName: 'OCR.Space' },
   'google-vision': { apiKey: '', endpoint: 'https://vision.googleapis.com/v1/images:annotate', model: 'TEXT_DETECTION', interfaceName: 'Google Cloud Vision' },
   'paddle-ocr': { apiKey: '', endpoint: 'https://paddleocr.aistudio-app.com', model: 'PP-OCRv6', interfaceName: 'PaddleOCR' },

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "paddle-ocr-mobile",
+  "displayName": "本机 PaddleOCR 3（增强插件）",
+  "version": "1.0.0",
+  "entry": "paddle_ocr_worker.py",
+  "runtime": "runtime/python.exe",
+  "modelDirectories": [
+    "models/PP-OCRv5_mobile_det",
+    "models/PP-OCRv5_mobile_rec"
+  ]
+}

@@ -27,7 +27,7 @@ declare global {
   }
 
   type PatentCloudOcrPayload = {
-    provider: 'local' | 'ocr-space' | 'google-vision' | 'paddle-ocr' | 'custom'
+  provider: 'local' | 'paddle-local' | 'ocr-space' | 'google-vision' | 'paddle-ocr' | 'custom'
     imageDataUrl: string
     imageWidth: number
     imageHeight: number
@@ -46,6 +46,14 @@ declare global {
       height: number
       confidence: number
     }>
+  }
+
+  type PatentOcrPluginStatus = {
+    installed: boolean
+    id: string
+    displayName: string
+    version: string
+    message: string
   }
 
   type PatentRatingsPayload = {
@@ -164,10 +172,34 @@ declare global {
     findings: PatentLlmReviewFindingPayload[]
   }
 
+  type PatentClaimBasisIssuePayload = {
+    claimNumber: number
+    severity: string
+    term: string
+    conclusion: string
+    message: string
+    sources: string
+    paths: string
+  }
+
+  type PatentClaimBasisReportPayload = {
+    totalClaims: number
+    issues: PatentClaimBasisIssuePayload[]
+  }
+
   type PatentSaveRevisionResult = {
     revisionPath: string
     ratingPath: string | null
     reviewPath: string | null
+  }
+
+  type PatentUpdateCheck = {
+    currentVersion: string
+    latestVersion: string | null
+    releaseUrl: string | null
+    releaseName: string | null
+    publishedAt: string | null
+    updateAvailable: boolean
   }
 
   interface Window {
@@ -183,6 +215,7 @@ declare global {
         annotations: PatentAnnotation[],
         ratings: PatentRatingsPayload,
         llmReport: PatentLlmReviewReportPayload | null,
+        claimBasisReport: PatentClaimBasisReportPayload | null,
       ) => Promise<PatentSaveRevisionResult>
       openComparisonDocuments?: () => Promise<Array<{
         path: string
@@ -191,6 +224,8 @@ declare global {
         base64: string
       }>>
       cloudOcr?: (payload: PatentCloudOcrPayload) => Promise<PatentCloudOcrResult>
+      ocrPluginStatus?: () => Promise<PatentOcrPluginStatus>
+      installPaddleOcrPlugin?: () => Promise<PatentOcrPluginStatus>
       llmCompletion?: (payload: PatentLlmCompletionPayload) => Promise<{ content: string }>
       llmListModels?: (payload: PatentLlmModelListPayload) => Promise<{ models: string[] }>
       llmAgentTurn?: (payload: PatentLlmAgentTurnPayload) => Promise<PatentLlmAgentTurnResult>
@@ -199,6 +234,10 @@ declare global {
       retrievalCallTool?: (payload: PatentResearchToolCallPayload) => Promise<{ content: string }>
       retrievalExecute?: (payload: PatentRetrievalExecutePayload) => Promise<{ content: string }>
       openExternalUrl?: (url: string) => Promise<void>
+      saveUserGuide?: () => Promise<{ saved: boolean; path: string | null }>
+      checkForUpdate?: () => Promise<PatentUpdateCheck>
+      onExitRequested?: (handler: () => void) => Promise<() => void>
+      exitApp?: () => Promise<void>
     }
   }
 }

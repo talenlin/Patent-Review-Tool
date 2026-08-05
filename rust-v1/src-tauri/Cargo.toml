@@ -1,9 +1,16 @@
 [package]
 name = "patent-reader-v1"
-version = "2.1.0"
+version = "2.1.3"
 description = "Windows 本地专利阅读与图文关联辅助工具"
 authors = ["Patent Reader"]
 edition = "2021"
+
+[features]
+# The close confirmation is a v2.1.3 addition.  The local-only v1.1.2
+# flavor is intentionally built without it so it stays on the v2.1.2
+# interaction baseline while sharing the same source tree.
+default = []
+exit-confirmation = []
 
 [lib]
 name = "patent_reader_v1_lib"

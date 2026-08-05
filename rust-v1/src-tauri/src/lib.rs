@@ -7,6 +7,9 @@ use rust_xlsxwriter::{Format, Workbook};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, fs::File, io::{Cursor, Read, Write}, path::{Path, PathBuf}, process::Command, time::Duration};
+#[cfg(feature = "exit-confirmation")]
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Manager};
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 #[cfg(windows)]
@@ -54,6 +57,61 @@ struct CloudOcrResult {
     words: Vec<CloudOcrWord>,
 }
 
+const USER_GUIDE_HTML: &str = include_str!("../../../app/public/guides/专利阅研使用指南.html");
+const UPDATE_RELEASE_API: &str = "https://api.github.com/repos/talenlin/Patent-Review-Tool/releases/latest";
+#[cfg(feature = "exit-confirmation")]
+static CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveUserGuideResult {
+    saved: bool,
+    path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheckResult {
+    current_version: String,
+    latest_version: Option<String>,
+    release_url: Option<String>,
+    release_name: Option<String>,
+    published_at: Option<String>,
+    update_available: bool,
+}
+
+const PADDLE_PLUGIN_ID: &str = "paddle-ocr-mobile";
+const PADDLE_PLUGIN_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PaddlePluginManifest {
+    schema_version: u32,
+    id: String,
+    display_name: String,
+    version: String,
+    entry: String,
+    runtime: String,
+    #[serde(default)]
+    model_directories: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PaddlePlugin {
+    root: PathBuf,
+    manifest: PaddlePluginManifest,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrPluginStatus {
+    installed: bool,
+    id: String,
+    display_name: String,
+    version: String,
+    message: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AnnotationPayload {
@@ -63,7 +121,6 @@ struct AnnotationPayload {
     status: String,
     author: String,
     body: String,
-    location: String,
     selected_text: Option<String>,
     selection_anchor: Option<SelectionAnchorPayload>,
 }
@@ -101,6 +158,25 @@ struct LlmReviewReportPayload {
     model: String,
     generated_at: String,
     findings: Vec<LlmReviewFindingPayload>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ClaimBasisIssuePayload {
+    claim_number: u32,
+    severity: String,
+    term: String,
+    conclusion: String,
+    message: String,
+    sources: String,
+    paths: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ClaimBasisReportPayload {
+    total_claims: u32,
+    issues: Vec<ClaimBasisIssuePayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -774,15 +850,21 @@ fn next_comment_id(comments_xml: &str) -> usize {
     next_id
 }
 
-fn comment_xml_entry(id: usize, annotation: &AnnotationPayload) -> String {
-    let summary = format!(
-        "【{} · {} · {}】{}\n定位：{}",
+fn annotation_summary(annotation: &AnnotationPayload) -> String {
+    if annotation.annotation_type == "LLM辅助审查" {
+        return annotation.body.trim().to_string();
+    }
+    format!(
+        "【{} · {} · {}】{}",
         annotation.annotation_type,
         annotation.severity,
         annotation.status,
         annotation.body,
-        annotation.location,
-    );
+    )
+}
+
+fn comment_xml_entry(id: usize, annotation: &AnnotationPayload) -> String {
+    let summary = annotation_summary(annotation);
     let author = annotation.author.trim();
     let author = if author.is_empty() { "专利阅研" } else { author };
     let initials = author.chars().next().map(|value| value.to_string()).unwrap_or_else(|| "阅".to_string());
@@ -903,14 +985,7 @@ fn pdf_unicode_string(value: &str) -> Object {
 }
 
 fn pdf_annotation_summary(annotation: &AnnotationPayload) -> String {
-    format!(
-        "【{} · {} · {}】{}\n定位：{}",
-        annotation.annotation_type,
-        annotation.severity,
-        annotation.status,
-        annotation.body,
-        annotation.location,
-    )
+    annotation_summary(annotation)
 }
 
 fn inherited_page_object(document: &Document, page_id: ObjectId, key: &[u8]) -> Option<Object> {
@@ -1181,7 +1256,8 @@ fn write_review_workbook(
     destination: &Path,
     case_name: &str,
     ratings: Option<&RatingPayload>,
-    report: &LlmReviewReportPayload,
+    report: Option<&LlmReviewReportPayload>,
+    claim_basis_report: Option<&ClaimBasisReportPayload>,
 ) -> Result<(), String> {
     let mut workbook = Workbook::new();
     let default_format = Format::new().set_font_name("微软雅黑").set_font_size(10);
@@ -1210,24 +1286,26 @@ fn write_review_workbook(
         findings.write_with_format(0, column as u16, *header, &header_format)
             .map_err(|error| format!("无法写入审查报告表头：{error}"))?;
     }
-    for (index, finding) in report.findings.iter().enumerate() {
-        let row = (index + 1) as u32;
-        let values = [
-            (index + 1).to_string(),
-            finding.module.clone(),
-            finding.severity.clone(),
-            finding.evidence_level.clone(),
-            finding.title.clone(),
-            finding.location.clone(),
-            finding.quote.clone(),
-            finding.analysis.clone(),
-            finding.recommendation.clone(),
-            finding.sources.clone(),
-            if finding.accepted { "已采纳".to_string() } else { "未采纳".to_string() },
-        ];
-        for (column, value) in values.iter().enumerate() {
-            findings.write_with_format(row, column as u16, value, &wrap_format)
-                .map_err(|error| format!("无法写入审查报告：{error}"))?;
+    if let Some(report) = report {
+        for (index, finding) in report.findings.iter().enumerate() {
+            let row = (index + 1) as u32;
+            let values = [
+                (index + 1).to_string(),
+                finding.module.clone(),
+                finding.severity.clone(),
+                finding.evidence_level.clone(),
+                finding.title.clone(),
+                finding.location.clone(),
+                finding.quote.clone(),
+                finding.analysis.clone(),
+                finding.recommendation.clone(),
+                finding.sources.clone(),
+                if finding.accepted { "已采纳".to_string() } else { "未采纳".to_string() },
+            ];
+            for (column, value) in values.iter().enumerate() {
+                findings.write_with_format(row, column as u16, value, &wrap_format)
+                    .map_err(|error| format!("无法写入审查报告：{error}"))?;
+            }
         }
     }
     findings.set_freeze_panes(1, 0)
@@ -1242,14 +1320,23 @@ fn write_review_workbook(
         communication: String::new(),
         patent_quality: String::new(),
     });
+    let report_metadata = report.cloned().unwrap_or(LlmReviewReportPayload {
+        technical_field: "未运行 LLM 审查".to_string(),
+        rulebook_version: String::new(),
+        rulebook_verified_at: String::new(),
+        provider: "本地引用基础判断".to_string(),
+        model: String::new(),
+        generated_at: String::new(),
+        findings: Vec::new(),
+    });
     let metadata = [
         ("案件", case_name.to_string()),
-        ("技术领域", report.technical_field.clone()),
-        ("LLM服务商", report.provider.clone()),
-        ("模型", report.model.clone()),
-        ("规则库版本", report.rulebook_version.clone()),
-        ("规则库核验日期", report.rulebook_verified_at.clone()),
-        ("生成时间", report.generated_at.clone()),
+        ("技术领域", report_metadata.technical_field),
+        ("LLM服务商", report_metadata.provider),
+        ("模型", report_metadata.model),
+        ("规则库版本", report_metadata.rulebook_version),
+        ("规则库核验日期", report_metadata.rulebook_verified_at),
+        ("生成时间", report_metadata.generated_at),
         ("技术理解评级", rating_values.technical_understanding),
         ("沟通评级", rating_values.communication),
         ("专利质量评级", rating_values.patent_quality),
@@ -1260,6 +1347,41 @@ fn write_review_workbook(
             .map_err(|error| format!("无法写入审查信息：{error}"))?;
         summary.write_with_format(row as u32, 1, value, &wrap_format)
             .map_err(|error| format!("无法写入审查信息：{error}"))?;
+    }
+
+    if let Some(claim_basis_report) = claim_basis_report {
+        let basis = workbook.add_worksheet();
+        basis.set_name("引用基础判断").map_err(|error| format!("无法创建引用基础工作表：{error}"))?;
+        let basis_headers = ["权利要求号", "风险等级", "术语", "结论", "说明", "引用基础", "继承路径"];
+        let basis_widths = [14.0, 12.0, 22.0, 16.0, 52.0, 42.0, 34.0];
+        for (column, (header, width)) in basis_headers.iter().zip(basis_widths).enumerate() {
+            basis.set_column_width(column as u16, width)
+                .map_err(|error| format!("无法设置引用基础报告列宽：{error}"))?;
+            basis.write_with_format(0, column as u16, *header, &header_format)
+                .map_err(|error| format!("无法写入引用基础报告表头：{error}"))?;
+        }
+        for (index, issue) in claim_basis_report.issues.iter().enumerate() {
+            let row = (index + 1) as u32;
+            let values = [
+                format!("权{}", issue.claim_number),
+                issue.severity.clone(),
+                issue.term.clone(),
+                issue.conclusion.clone(),
+                issue.message.clone(),
+                issue.sources.clone(),
+                issue.paths.clone(),
+            ];
+            for (column, value) in values.iter().enumerate() {
+                basis.write_with_format(row, column as u16, value, &wrap_format)
+                    .map_err(|error| format!("无法写入引用基础报告：{error}"))?;
+            }
+        }
+        if claim_basis_report.issues.is_empty() {
+            basis.write_with_format(1, 0, format!("已校验 {} 项权利要求，未发现高/中风险。", claim_basis_report.total_claims), &wrap_format)
+                .map_err(|error| format!("无法写入引用基础报告摘要：{error}"))?;
+        }
+        basis.set_freeze_panes(1, 0)
+            .map_err(|error| format!("无法设置引用基础报告冻结窗格：{error}"))?;
     }
 
     workbook.save(destination).map_err(|error| format!("无法保存LLM审查报告：{error}"))
@@ -1359,6 +1481,11 @@ fn is_deepseek_provider(provider: &str, endpoint: &str) -> bool {
         || endpoint.to_ascii_lowercase().contains("api.deepseek.com")
 }
 
+fn prompt_requests_json(system: &str, user: &str) -> bool {
+    system.to_ascii_lowercase().contains("json")
+        || user.to_ascii_lowercase().contains("json")
+}
+
 fn llm_finalization_request_body(model: &str, reasoning: &str) -> Value {
     json!({
         "model": model.trim(),
@@ -1396,7 +1523,9 @@ fn llm_completion_request_body(
     });
     if is_deepseek_provider(provider, endpoint) {
         body["thinking"] = json!({ "type": "enabled" });
-        body["response_format"] = json!({ "type": "json_object" });
+        if prompt_requests_json(system, user) {
+            body["response_format"] = json!({ "type": "json_object" });
+        }
     }
     body
 }
@@ -1689,11 +1818,221 @@ fn custom_ocr(payload: &CloudOcrPayload, client: &Client) -> Result<CloudOcrResu
     Ok(CloudOcrResult { words: parse_custom_words(&structured) })
 }
 
-fn cloud_ocr_blocking(payload: CloudOcrPayload) -> Result<CloudOcrResult, String> {
-    if payload.provider != "local" && payload.api_key.trim().is_empty() {
+fn safe_plugin_relative_path(value: &str, label: &str) -> Result<PathBuf, String> {
+    let path = Path::new(value);
+    if value.trim().is_empty() || path.is_absolute() || path.components().any(|component| matches!(component, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) {
+        return Err(format!("PaddleOCR 插件的 {label} 路径无效。"));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn load_paddle_plugin(root: PathBuf) -> Result<PaddlePlugin, String> {
+    let manifest_path = root.join("plugin.json");
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .map_err(|_| "PaddleOCR 插件缺少 plugin.json。请重新下载插件包。".to_string())?;
+    let manifest: PaddlePluginManifest = serde_json::from_str(&manifest_text)
+        .map_err(|error| format!("PaddleOCR 插件清单格式无效：{error}"))?;
+    if manifest.schema_version != PADDLE_PLUGIN_SCHEMA_VERSION || manifest.id != PADDLE_PLUGIN_ID {
+        return Err("PaddleOCR 插件与当前程序不兼容。请下载正确的插件包。".to_string());
+    }
+    let entry = safe_plugin_relative_path(&manifest.entry, "入口")?;
+    let runtime = safe_plugin_relative_path(&manifest.runtime, "运行时")?;
+    if !root.join(&entry).is_file() || !root.join(&runtime).is_file() {
+        return Err("PaddleOCR 插件文件不完整。请重新安装插件。".to_string());
+    }
+    for model_directory in &manifest.model_directories {
+        let model = safe_plugin_relative_path(model_directory, "模型")?;
+        if !root.join(model).is_dir() {
+            return Err("PaddleOCR 插件模型文件不完整。请重新安装插件。".to_string());
+        }
+    }
+    Ok(PaddlePlugin { root, manifest })
+}
+
+fn paddle_plugin_install_root(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path().app_data_dir()
+        .map(|path| path.join("plugins").join(PADDLE_PLUGIN_ID))
+        .map_err(|error| format!("无法定位 OCR 插件目录：{error}"))
+}
+
+fn resolve_paddle_plugin(app: &AppHandle) -> Result<PaddlePlugin, String> {
+    let installed = paddle_plugin_install_root(app)?;
+    if installed.join("plugin.json").is_file() {
+        return load_paddle_plugin(installed);
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("paddle-ocr");
+        if development.join("plugin.json").is_file() {
+            return load_paddle_plugin(development);
+        }
+    }
+
+    Err("本机 PaddleOCR（轻量）插件尚未安装。请在 OCR 设置中选择已下载的插件 ZIP 安装。".to_string())
+}
+
+fn paddle_plugin_status(app: &AppHandle) -> OcrPluginStatus {
+    match resolve_paddle_plugin(app) {
+        Ok(plugin) => OcrPluginStatus {
+            installed: true,
+            id: plugin.manifest.id,
+            display_name: plugin.manifest.display_name,
+            version: plugin.manifest.version,
+            message: "已安装；识别仅在本机运行。".to_string(),
+        },
+        Err(message) => OcrPluginStatus {
+            installed: false,
+            id: PADDLE_PLUGIN_ID.to_string(),
+            display_name: "本机 PaddleOCR 3（增强插件）".to_string(),
+            version: String::new(),
+            message,
+        },
+    }
+}
+
+fn extract_paddle_plugin_archive(archive_path: &Path, destination: &Path) -> Result<(), String> {
+    let archive_file = File::open(archive_path)
+        .map_err(|error| format!("无法读取 PaddleOCR 插件包：{error}"))?;
+    let mut archive = ZipArchive::new(archive_file)
+        .map_err(|error| format!("PaddleOCR 插件包不是有效 ZIP：{error}"))?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)
+            .map_err(|error| format!("无法读取 PaddleOCR 插件文件：{error}"))?;
+        let relative = safe_plugin_relative_path(entry.name(), "压缩包")?;
+        let output = destination.join(relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&output).map_err(|error| format!("无法创建插件目录：{error}"))?;
+            continue;
+        }
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("无法创建插件目录：{error}"))?;
+        }
+        let mut target = File::create(&output).map_err(|error| format!("无法写入插件文件：{error}"))?;
+        std::io::copy(&mut entry, &mut target).map_err(|error| format!("无法解压插件文件：{error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn ocr_plugin_status(app: AppHandle) -> OcrPluginStatus {
+    paddle_plugin_status(&app)
+}
+
+#[tauri::command]
+fn install_paddle_ocr_plugin(app: AppHandle) -> Result<OcrPluginStatus, String> {
+    let archive_path = FileDialog::new()
+        .add_filter("PaddleOCR 插件包", &["zip"])
+        .pick_file()
+        .ok_or_else(|| "未选择 PaddleOCR 插件包。".to_string())?;
+    let destination = paddle_plugin_install_root(&app)?;
+    let parent = destination.parent().ok_or_else(|| "OCR 插件目录无效。".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建 OCR 插件目录：{error}"))?;
+    let staging = parent.join(format!(".{PADDLE_PLUGIN_ID}-install-{}", std::process::id()));
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(|error| format!("无法准备插件安装：{error}"))?;
+    }
+    fs::create_dir_all(&staging).map_err(|error| format!("无法准备插件安装：{error}"))?;
+    let install_result = (|| {
+        extract_paddle_plugin_archive(&archive_path, &staging)?;
+        load_paddle_plugin(staging.clone())?;
+        if destination.exists() {
+            fs::remove_dir_all(&destination).map_err(|error| format!("无法替换旧版 PaddleOCR 插件：{error}"))?;
+        }
+        fs::rename(&staging, &destination).map_err(|error| format!("无法完成 PaddleOCR 插件安装：{error}"))?;
+        Ok::<(), String>(())
+    })();
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    install_result?;
+    Ok(paddle_plugin_status(&app))
+}
+
+fn local_paddle_worker_path(plugin: &PaddlePlugin) -> Result<PathBuf, String> {
+    let entry = safe_plugin_relative_path(&plugin.manifest.entry, "入口")?;
+    let worker = plugin.root.join(entry);
+    if worker.is_file() { Ok(worker) } else { Err("PaddleOCR 插件入口文件丢失。请重新安装插件。".to_string()) }
+}
+
+fn local_paddle_python_command(plugin: &PaddlePlugin, worker: &Path) -> Result<Command, String> {
+    if let Some(path) = std::env::var_os("PATENT_READER_PADDLE_PYTHON") {
+        let python = PathBuf::from(path);
+        if python.is_file() {
+            let mut command = Command::new(python);
+            command.arg(worker);
+            return Ok(command);
+        }
+        return Err("PATENT_READER_PADDLE_PYTHON 指向的 Python 不存在。".to_string());
+    }
+
+    let runtime = safe_plugin_relative_path(&plugin.manifest.runtime, "运行时")?;
+    let bundled_python = plugin.root.join(runtime);
+    if bundled_python.is_file() {
+        let mut command = Command::new(bundled_python);
+        command.arg(worker);
+        return Ok(command);
+    }
+
+    // Development fallback: release hosts never require a machine-wide Python.
+    // keeps the same local-only path testable without silently using a network
+    // service. PaddleOCR 3.x currently supports Python 3.12 on Windows.
+    let mut command = Command::new("py");
+    command.args(["-3.12", worker.to_string_lossy().as_ref()]);
+    Ok(command)
+}
+
+fn parse_local_paddle_result(body: &str) -> Result<CloudOcrResult, String> {
+    let value: Value = serde_json::from_str(body.trim())
+        .map_err(|error| format!("本机 PaddleOCR 3 返回的结果格式无效：{error}"))?;
+    let words = parse_custom_words(&value);
+    if words.is_empty() && !value.get("words").is_some_and(Value::is_array) {
+        return Err("本机 PaddleOCR 3 未返回文字坐标。".to_string());
+    }
+    Ok(CloudOcrResult { words })
+}
+
+fn local_paddle_ocr(payload: &CloudOcrPayload, plugin: &PaddlePlugin) -> Result<CloudOcrResult, String> {
+    let encoded = image_base64(&payload.image_data_url)?;
+    let image = STANDARD.decode(encoded)
+        .map_err(|error| format!("无法读取附图的本机 OCR 数据：{error}"))?;
+    let worker = local_paddle_worker_path(plugin)?;
+    let mut image_file = tempfile::Builder::new()
+        .prefix("patent-reader-figure-")
+        .suffix(".png")
+        .tempfile()
+        .map_err(|error| format!("无法准备本机 PaddleOCR 附图：{error}"))?;
+    image_file.write_all(&image)
+        .map_err(|error| format!("无法写入本机 PaddleOCR 附图：{error}"))?;
+
+    let mut command = local_paddle_python_command(plugin, &worker)?;
+    command.arg("--image").arg(image_file.path());
+    command.env("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "1");
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+    let output = command.output().map_err(|error| {
+        format!("无法启动本机 PaddleOCR 3：{error}。插件包应包含本机运行时；开发环境请安装 Python 3.12 与 PaddleOCR 3.x。")
+    })?;
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        let summary = stderr.chars().take(700).collect::<String>();
+        return Err(format!("本机 PaddleOCR 3 识别失败：{}", if summary.is_empty() { "运行时未能返回诊断信息。".to_string() } else { summary }));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_line = stdout.lines().rev().find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| format!("本机 PaddleOCR 3 未返回识别结果。{}", if stderr.is_empty() { String::new() } else { format!(" 诊断：{}", stderr.chars().take(300).collect::<String>()) }))?;
+    parse_local_paddle_result(json_line)
+}
+
+fn cloud_ocr_blocking(payload: CloudOcrPayload, paddle_plugin: Option<PaddlePlugin>) -> Result<CloudOcrResult, String> {
+    if payload.provider != "local" && payload.provider != "paddle-local" && payload.api_key.trim().is_empty() {
         return Err("请先填写所选云 OCR 的 API Key。".to_string());
     }
     image_base64(&payload.image_data_url)?;
+    if payload.provider == "paddle-local" {
+        return local_paddle_ocr(&payload, paddle_plugin.as_ref().ok_or_else(|| "本机 PaddleOCR 插件尚未安装。".to_string())?);
+    }
     let client = cloud_ocr_client()?;
     match payload.provider.as_str() {
         "ocr-space" => ocr_space(&payload, &client),
@@ -1705,8 +2044,9 @@ fn cloud_ocr_blocking(payload: CloudOcrPayload) -> Result<CloudOcrResult, String
 }
 
 #[tauri::command]
-async fn cloud_ocr(payload: CloudOcrPayload) -> Result<CloudOcrResult, String> {
-    tauri::async_runtime::spawn_blocking(move || cloud_ocr_blocking(payload))
+async fn cloud_ocr(app: AppHandle, payload: CloudOcrPayload) -> Result<CloudOcrResult, String> {
+    let paddle_plugin = if payload.provider == "paddle-local" { Some(resolve_paddle_plugin(&app)?) } else { None };
+    tauri::async_runtime::spawn_blocking(move || cloud_ocr_blocking(payload, paddle_plugin))
         .await
         .map_err(|error| format!("云 OCR 后台任务异常结束：{error}"))?
 }
@@ -1730,6 +2070,103 @@ fn open_external_url(url: String) -> Result<(), String> {
     command.spawn()
         .map_err(|error| format!("无法调用 Windows 默认浏览器：{error}"))?;
     Ok(())
+}
+
+#[tauri::command]
+fn save_user_guide() -> Result<SaveUserGuideResult, String> {
+    let target = FileDialog::new()
+        .set_title("保存专利阅研使用指南")
+        .set_file_name("专利阅研使用指南.html")
+        .add_filter("HTML 网页", &["html", "htm"])
+        .save_file();
+    let Some(path) = target else {
+        return Ok(SaveUserGuideResult { saved: false, path: None });
+    };
+    fs::write(&path, USER_GUIDE_HTML.as_bytes())
+        .map_err(|error| format!("无法保存使用指南：{error}"))?;
+    Ok(SaveUserGuideResult {
+        saved: true,
+        path: Some(path.to_string_lossy().into_owned()),
+    })
+}
+
+fn version_parts(value: &str) -> Vec<u64> {
+    value
+        .trim()
+        .trim_start_matches(['v', 'V'])
+        .split(['.', '-', '+'])
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+fn is_newer_version(remote: &str, current: &str) -> bool {
+    let remote_parts = version_parts(remote);
+    let current_parts = version_parts(current);
+    let length = remote_parts.len().max(current_parts.len());
+    for index in 0..length {
+        let remote_part = *remote_parts.get(index).unwrap_or(&0);
+        let current_part = *current_parts.get(index).unwrap_or(&0);
+        if remote_part != current_part {
+            return remote_part > current_part;
+        }
+    }
+    false
+}
+
+fn check_for_update_blocking(current_version: String) -> Result<UpdateCheckResult, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(12))
+        .user_agent(format!("PatentReader/{current_version}"))
+        .build()
+        .map_err(|error| format!("无法创建更新检查请求：{error}"))?;
+    let response = client
+        .get(UPDATE_RELEASE_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|error| format!("无法连接 GitHub 更新服务：{error}"))?;
+    if response.status().as_u16() == 404 {
+        return Ok(UpdateCheckResult {
+            current_version,
+            latest_version: None,
+            release_url: None,
+            release_name: None,
+            published_at: None,
+            update_available: false,
+        });
+    }
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("GitHub 更新服务返回 HTTP {status}"));
+    }
+    let release: Value = response
+        .json()
+        .map_err(|error| format!("无法读取 GitHub 更新信息：{error}"))?;
+    let latest_version = release.get("tag_name").and_then(Value::as_str).map(str::to_owned);
+    let update_available = latest_version
+        .as_deref()
+        .is_some_and(|version| is_newer_version(version, &current_version));
+    Ok(UpdateCheckResult {
+        current_version,
+        latest_version,
+        release_url: release.get("html_url").and_then(Value::as_str).map(str::to_owned),
+        release_name: release.get("name").and_then(Value::as_str).map(str::to_owned),
+        published_at: release.get("published_at").and_then(Value::as_str).map(str::to_owned),
+        update_available,
+    })
+}
+
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> Result<UpdateCheckResult, String> {
+    // Read the version that Tauri embedded from the active flavor config.
+    // This keeps the local-only v1.1.2 update channel independent from the
+    // full v2.x build even though both flavors share the Rust source crate.
+    let current_version = app.config()
+        .version
+        .clone()
+        .unwrap_or_else(|| app.package_info().version.to_string());
+    tauri::async_runtime::spawn_blocking(move || check_for_update_blocking(current_version))
+        .await
+        .map_err(|error| format!("更新检查任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -2774,6 +3211,7 @@ fn save_revision(
     annotations: Vec<AnnotationPayload>,
     ratings: Option<RatingPayload>,
     llm_report: Option<LlmReviewReportPayload>,
+    claim_basis_report: Option<ClaimBasisReportPayload>,
 ) -> Result<SaveRevisionResult, String> {
     let original = PathBuf::from(original_path);
     if !original.is_file() {
@@ -2803,12 +3241,13 @@ fn save_revision(
             Ok::<String, String>(path.to_string_lossy().into_owned())
         })
         .transpose()?;
-    let review_path = llm_report
-        .filter(|value| !value.findings.is_empty())
-        .map(|value| {
+    let has_llm_report = llm_report.as_ref().is_some_and(|value| !value.findings.is_empty());
+    let has_claim_basis_report = claim_basis_report.as_ref().is_some_and(|value| !value.issues.is_empty());
+    let review_path = (has_llm_report || has_claim_basis_report)
+        .then(|| {
             let path = review_workbook_path(&original);
             let case_name = original.file_name().and_then(|value| value.to_str()).unwrap_or("专利文件");
-            write_review_workbook(&path, case_name, ratings.as_ref(), &value)?;
+            write_review_workbook(&path, case_name, ratings.as_ref(), llm_report.as_ref(), claim_basis_report.as_ref())?;
             Ok::<String, String>(path.to_string_lossy().into_owned())
         })
         .transpose()?;
@@ -2819,12 +3258,40 @@ fn save_revision(
     })
 }
 
+#[tauri::command]
+fn exit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
+fn take_close_request() -> bool {
+    #[cfg(feature = "exit-confirmation")]
+    {
+        return CLOSE_REQUESTED.swap(false, Ordering::AcqRel);
+    }
+    #[cfg(not(feature = "exit-confirmation"))]
+    {
+        false
+    }
+}
+
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "exit-confirmation")]
+    let builder = builder
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                CLOSE_REQUESTED.store(true, Ordering::Release);
+            }
+        });
+    builder
         .invoke_handler(tauri::generate_handler![
             open_document,
             open_comparison_documents,
             save_revision,
+            ocr_plugin_status,
+            install_paddle_ocr_plugin,
             cloud_ocr,
             llm_completion,
             llm_list_models,
@@ -2833,7 +3300,11 @@ pub fn run() {
             retrieval_list_tools,
             retrieval_call_tool,
             retrieval_execute,
-            open_external_url
+            open_external_url,
+            save_user_guide,
+            check_for_update,
+            exit_app,
+            take_close_request
         ])
         .run(tauri::generate_context!())
         .expect("启动专利阅研失败");
@@ -2843,6 +3314,16 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(feature = "exit-confirmation")]
+    #[test]
+    fn close_request_is_consumed_once_by_the_frontend() {
+        CLOSE_REQUESTED.store(false, Ordering::Release);
+        assert!(!take_close_request());
+        CLOSE_REQUESTED.store(true, Ordering::Release);
+        assert!(take_close_request());
+        assert!(!take_close_request());
+    }
 
     #[test]
     fn long_non_streaming_llm_reviews_have_an_actionable_transport_policy() {
@@ -2905,12 +3386,28 @@ mod tests {
             "DeepSeek",
             "https://api.deepseek.com/chat/completions",
             "deepseek-v4-flash",
-            "system prompt",
-            "user prompt",
+            "输出合法JSON对象，不使用Markdown。",
+            "请按指定JSON结构返回审查卡片。",
         );
         assert_eq!(body.pointer("/thinking/type").and_then(Value::as_str), Some("enabled"));
         assert_eq!(body.pointer("/response_format/type").and_then(Value::as_str), Some("json_object"));
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn deepseek_plain_text_generation_does_not_force_json_response_format() {
+        let body = llm_completion_request_body(
+            "DeepSeek",
+            "https://api.deepseek.com/chat/completions",
+            "deepseek-v4-flash",
+            "你是专利技术事实检索规划助手。",
+            "请生成可直接编辑的技术事实检索方案。",
+        );
+        assert_eq!(body.pointer("/thinking/type").and_then(Value::as_str), Some("enabled"));
+        assert!(
+            body.get("response_format").is_none(),
+            "普通文本生成提示词不含 JSON 要求时，不得向 DeepSeek 强制发送 json_object",
+        );
     }
 
     #[test]
@@ -2970,8 +3467,41 @@ mod tests {
             endpoint: String::new(),
             model: String::new(),
             interface_name: String::new(),
-        }).unwrap_err();
+        }, None).unwrap_err();
         assert!(error.contains("只允许上传附图"));
+    }
+
+    #[test]
+    fn local_paddle_plugin_does_not_require_an_api_key() {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("patent-reader-paddle-api-key-{unique}"));
+        fs::create_dir_all(&root).unwrap();
+        let plugin = PaddlePlugin {
+            root: root.clone(),
+            manifest: PaddlePluginManifest {
+                schema_version: PADDLE_PLUGIN_SCHEMA_VERSION,
+                id: PADDLE_PLUGIN_ID.to_string(),
+                display_name: "Test Paddle Plugin".to_string(),
+                version: "test".to_string(),
+                entry: "missing-worker.py".to_string(),
+                runtime: "missing-python.exe".to_string(),
+                model_directories: Vec::new(),
+            },
+        };
+        let payload = CloudOcrPayload {
+            provider: "paddle-local".to_string(),
+            image_data_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL8CQAAAABJRU5ErkJggg==".to_string(),
+            image_width: 1.0,
+            image_height: 1.0,
+            api_key: String::new(),
+            endpoint: String::new(),
+            model: String::new(),
+            interface_name: String::new(),
+        };
+
+        let error = cloud_ocr_blocking(payload, Some(plugin)).unwrap_err();
+        assert!(!error.contains("API Key"), "paddle-local must never require an API Key: {error}");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2986,6 +3516,14 @@ mod tests {
         );
         assert!(validated_external_url("file:///C:/Windows/System32/calc.exe").is_err());
         assert!(validated_external_url("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn update_check_compares_release_tags_numerically() {
+        assert!(is_newer_version("v2.1.10", "2.1.2"));
+        assert!(is_newer_version("v2.2.0", "2.1.99"));
+        assert!(!is_newer_version("v2.1.1", "2.1.2"));
+        assert!(!is_newer_version("v2.1.2", "2.1.2"));
     }
 
     #[test]
@@ -3025,6 +3563,25 @@ mod tests {
         assert_eq!(custom.len(), 1);
         assert_eq!(custom[0].text, "221");
         assert_eq!(custom[0].left, 12.5);
+    }
+
+    #[test]
+    fn parses_local_paddle_ocr_v3_words_without_a_network_request() {
+        let result = parse_local_paddle_result(r#"{
+            "engine": "PaddleOCR 3.x PP-OCRv5",
+            "words": [{
+                "text": "1024",
+                "left": 10.0,
+                "top": 20.0,
+                "width": 5.0,
+                "height": 3.0,
+                "confidence": 98.5
+            }]
+        }"#).unwrap();
+        assert_eq!(result.words.len(), 1);
+        assert_eq!(result.words[0].text, "1024");
+        assert_eq!(result.words[0].left, 10.0);
+        assert_eq!(result.words[0].confidence, 98.5);
     }
 
     #[test]
@@ -3096,7 +3653,19 @@ mod tests {
             communication: "B".to_string(),
             patent_quality: "C".to_string(),
         };
-        write_review_workbook(&path, "示例专利.docx", Some(&ratings), &report).unwrap();
+        let claim_basis_report = ClaimBasisReportPayload {
+            total_claims: 3,
+            issues: vec![ClaimBasisIssuePayload {
+                claim_number: 2,
+                severity: "重要".to_string(),
+                term: "所述侧板围合".to_string(),
+                conclusion: "缺乏引入".to_string(),
+                message: "未找到可继承的首次引入。".to_string(),
+                sources: String::new(),
+                paths: "权1 → 权2".to_string(),
+            }],
+        };
+        write_review_workbook(&path, "示例专利.docx", Some(&ratings), Some(&report), Some(&claim_basis_report)).unwrap();
 
         let mut archive = ZipArchive::new(File::open(&path).unwrap()).unwrap();
         let mut shared_strings = String::new();
@@ -3106,6 +3675,11 @@ mod tests {
         assert!(shared_strings.contains("规则库核验"));
         assert!(shared_strings.contains("太阳能电池"));
         assert!(shared_strings.contains("1.0.1"));
+        assert!(shared_strings.contains("所述侧板围合"));
+        assert!(shared_strings.contains("缺乏引入"));
+        let mut workbook_xml = String::new();
+        archive.by_name("xl/workbook.xml").unwrap().read_to_string(&mut workbook_xml).unwrap();
+        assert!(workbook_xml.contains("引用基础判断"));
         assert!(shared_strings.contains("已采纳"));
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3189,7 +3763,6 @@ mod tests {
             status: "待处理".to_string(),
             author: "李明".to_string(),
             body: "请补充阀座的支持依据".to_string(),
-            location: "原文：选中的一句话。".to_string(),
             selected_text: Some("选中的一句话。".to_string()),
             selection_anchor: None,
         }]).unwrap();
@@ -3208,6 +3781,30 @@ mod tests {
         assert!(document.contains("w:commentReference w:id=\"0\"/></w:r><w:r><w:t>后缀文字。"));
 
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn saved_comment_text_excludes_location_and_keeps_llm_notes_compact() {
+        let annotation = AnnotationPayload {
+            annotation_type: "图文不一致".to_string(),
+            severity: "一般".to_string(),
+            status: "待处理".to_string(),
+            author: "测试人".to_string(),
+            body: "请核对附图标号。".to_string(),
+            selected_text: None,
+            selection_anchor: None,
+        };
+        let normal_comment = annotation_summary(&annotation);
+        assert!(normal_comment.contains("请核对附图标号"));
+        assert!(!normal_comment.contains("定位"));
+        assert!(!normal_comment.contains("原文"));
+
+        let llm_annotation = AnnotationPayload {
+            annotation_type: "LLM辅助审查".to_string(),
+            body: "风险类型：多引多".to_string(),
+            ..annotation
+        };
+        assert_eq!(annotation_summary(&llm_annotation), "风险类型：多引多");
     }
 
     #[test]
@@ -3298,7 +3895,6 @@ mod tests {
             status: "待处理".to_string(),
             author: "测试人".to_string(),
             body: "需要核对附图标号。".to_string(),
-            location: "PDF 第 1 页".to_string(),
             selected_text: Some("测试选区".to_string()),
             selection_anchor: Some(SelectionAnchorPayload {
                 start_paragraph_text: String::new(),

@@ -45,7 +45,7 @@ export type LlmRunMetadata = {
   generatedAt: string
 }
 
-type LlmReviewDialogProps = {
+export type LlmReviewDialogProps = {
   open: boolean
   patentText: string
   findings: LlmReviewFinding[]
@@ -606,6 +606,7 @@ export default function LlmReviewDialog({
     }
     const result = await runMcpResearchAgent({
       intent,
+      patsnapSyntax: retrieval.provider === 'patsnap-mcp',
       technicalField,
       confirmedSearchPlan,
       claimsText,

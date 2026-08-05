@@ -3,6 +3,7 @@ import type { RetrievalProvider } from './llm-settings'
 import type { PriorArtCandidate } from './prior-art-selection'
 import type { ReviewWorkPacket } from './review-execution'
 import { extractJsonObject } from './json-extraction'
+import { patsnapMcpSearchSyntax } from './mcp-research-agent'
 export { detectTechnicalField, extractClaimsText, technicalFieldsDiffer } from './technical-field'
 
 export type ReviewScope = 'claims' | 'full' | 'full-with-prior-art'
@@ -231,7 +232,9 @@ export function buildRetrievalQueryMessages(provider: RetrievalProvider, searchP
     ? `为 EPO OPS 生成1至6条CQL检索式。使用 ti（标题）、ab（摘要）、cl（IPC）、cpc、pa 等字段和 AND/OR；关键词短语使用英文双引号。不要生成自然语言问题。`
     : provider === 'zhipu'
       ? '生成1至6条可直接交给网页搜索引擎的中英文检索词；每条不得超过70个字符。'
-      : '生成1至6条适合专利检索MCP执行的简洁检索请求；每条只包含一个明确检索意图。'
+      : provider === 'patsnap-mcp'
+        ? `生成1至6条可直接传给智慧芽 search_patents 的检索式；每条只包含一个明确检索意图。\n${patsnapMcpSearchSyntax}`
+        : '生成1至6条适合专利检索MCP执行的简洁检索请求；每条只包含一个明确检索意图。'
   return {
     system: `你是检索式整理助手。只把用户已经确认的检索计划转换为可执行查询，不增加新的检索方向。${providerRule}输出合法JSON，不使用Markdown。`,
     user: JSON.stringify({

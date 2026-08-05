@@ -30,6 +30,18 @@ assert.deepEqual(legendPriority.filter((candidate) => candidate.number === '22')
 
 console.log('说明书附图标记格式回归检查通过')
 
+const tableLegend = extractLegendReferenceCandidates(`主要元件符号说明：
+光伏组件\t100
+太阳能板\t10a、10b
+容纳腔\tR
+水平视场角\tHFOV`)
+const tableLegendMap = new Map(tableLegend.map((candidate) => [candidate.number, candidate.name]))
+assert.equal(tableLegendMap.get('100'), '光伏组件', '表格型标记说明应识别名称—数字标号')
+assert.equal(tableLegendMap.get('10a'), '太阳能板', '一格多个标号应拆分识别')
+assert.equal(tableLegendMap.get('10b'), '太阳能板', '一格多个标号应完整保留')
+assert.equal(tableLegendMap.get('R'), '容纳腔', '表格型字母标号应识别')
+assert.equal(tableLegendMap.get('HFOV'), '水平视场角', '表格型多字母标号应识别')
+
 const liveBlocks = [
   { textContent: '摘要正文' },
   { textContent: '1.一种测试装置' },

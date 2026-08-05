@@ -51,6 +51,7 @@ export type ResearchIntent = 'prior-art' | 'technical-facts'
 
 type ResearchAgentOptions = {
   intent?: ResearchIntent
+  patsnapSyntax?: boolean
   technicalField: string
   confirmedSearchPlan: string
   claimsText: string
@@ -69,7 +70,19 @@ type ResearchAgentDependencies = {
   onProgress?: (entry: ResearchTraceEntry) => void
 }
 
-function researchSystemPrompt() {
+export const patsnapMcpSearchSyntax = `
+智慧芽 PatSnap MCP 检索式规则（仅在使用智慧芽时遵守）：
+【字段白名单】仅可使用 TAC（标题/摘要/权利要求）、TACD（标题/摘要/权利要求/说明书）、ICLMS（独立权利要求）、IPC、CPC、ALL_AN（申请/专利权人）、PN、PBD、PBD_Y、APD。不得使用 TACD_ALL、AP、PA 或其他未验证字段。
+【字段选择】默认用 TAC；需要全文扩大召回时才改用 TACD；核对独立权利要求核心特征时用 ICLMS。分类只用 IPC/CPC；申请人只用 ALL_AN；精确文献号用 PN；现有技术时效筛选优先用 PBD:YYYYMMDD 或 PBD:[YYYYMMDD TO YYYYMMDD]，按年用 PBD_Y。
+【运算符白名单】AND、OR、NOT、括号、双引号精确短语、词尾通配符 *；必要时才用 $Wn 或 $PREn。禁止 $FREQn、AND NOT、下划线分隔符。
+【检索路径】每条检索式只表达一个意图，最多 2–4 个特征块：
+1. 宽泛技术词 + IPC/CPC：TAC:(同义词组) AND IPC:(分类组)；
+2. 特征块组合：TACD:((特征块A) AND (特征块B))，结果少时逐轮从 4/3/2 个特征块松绑；
+3. 申请人定向：ALL_AN:(申请人组) AND TAC:(技术词组)；
+4. 翻译腔或口语化同义词兜底：TACD:(同义词组)，不叠加 IPC/CPC，防止遗漏。
+【约束】同一概念用 3–6 个高质量同义词 OR 连接；NOT 只用于明显噪声。不要把完整权利要求直接塞进检索式。工具参数名称必须以工具 schema 为准，通常将检索式传给 query_text 或 query 字段。`
+
+function researchSystemPrompt(patsnapSyntax = false) {
   return `你是专利现有技术检索代理。你可以自主调用已提供的专利检索工具，并根据每次结果继续调整检索策略。
 
 目标不是做一次关键词搜索，而是形成可追溯的对比文件候选集。必须执行以下闭环：
@@ -87,6 +100,7 @@ function researchSystemPrompt() {
 【未覆盖的检索方向】
 【人工复核事项】
 不要使用未经工具返回支持的事实。`
+    + (patsnapSyntax ? `\n${patsnapMcpSearchSyntax}` : '')
 }
 
 function researchUserPrompt(options: ResearchAgentOptions) {
@@ -140,7 +154,7 @@ export async function runMcpResearchAgent(
   const messages: ResearchAgentMessage[] = [
     {
       role: 'system',
-      content: technicalFactMode ? technicalFactResearchSystemPrompt() : researchSystemPrompt(),
+      content: technicalFactMode ? technicalFactResearchSystemPrompt() : researchSystemPrompt(options.patsnapSyntax),
     },
     {
       role: 'user',

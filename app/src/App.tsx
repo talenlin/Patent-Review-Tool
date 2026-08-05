@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle, ArrowLeft, BookOpenText, Check, ChevronDown, ChevronRight, ChevronUp, FileText, FolderOpen,
-  Cloud, Highlighter, Image, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Plus, QrCode, Save, Settings2, ShieldCheck, Sparkles, Tag, Trash2, Undo2, X,
+  AlertTriangle, ArrowDown, ArrowLeft, ArrowUp, BookOpenText, Check, ChevronDown, ChevronRight, ChevronUp, Download, FileText, FolderOpen,
+  Cloud, Highlighter, Image, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Plus, QrCode, RefreshCw, Save, Settings2, ShieldCheck, Sparkles, Tag, Trash2, Undo2, X,
 } from 'lucide-react'
 import './App.css'
 import authorQrCodeUrl from './assets/author-qrcode.png?inline'
+import brandLogoUrl from './assets/patent-reader-logo.png'
 import { recognizeCloudFigureLabels } from './cloud-ocr'
+import { recognizeFigureLabels } from './figure-ocr'
 import {
   activeOcrSettings, ocrProviderApiLinks, ocrProviderLabels,
   parseStoredOcrSettings, updateOcrProfile, type OcrProvider, type OcrSettingsStore,
@@ -18,10 +20,16 @@ import {
 } from './document-analysis'
 import { parsePdf, type PdfPageData } from './pdf-analysis'
 import { findDocxSectionTarget, scrollTargetWithin } from './section-navigation'
+import { cycleReferenceOccurrence } from './reference-navigation'
 import { analyzeClaimAntecedentBasis, type ClaimIssue } from './claim-antecedent-analysis'
-import LlmReviewDialog, { type LlmRunMetadata } from './LlmReviewDialog'
+import LlmReviewDialog from '@llm-review-dialog'
+import { type LlmRunMetadata } from './LlmReviewDialog'
 import { type LlmReviewFinding } from './llm-review'
 import { reviewRulebook } from './review-rulebook'
+
+// V1 builds turn this flag off at compile time so the LLM review entry points
+// and saved LLM review artifacts are unavailable in the local-only edition.
+const LLM_REVIEW_ENABLED = import.meta.env.VITE_ENABLE_LLM_REVIEW !== 'false'
 
 type LoadedFile = {
   path: string
@@ -31,6 +39,7 @@ type LoadedFile = {
   html: string
   text: string
   markers: string[]
+  pageCount: number
   previewUrl: string | null
   pdfPages: PdfPageData[]
   sections: PatentSection[]
@@ -91,6 +100,19 @@ const sectionCopy: Record<SectionKey, string> = {
 
 function numberSort(first: string, second: string) {
   return first.localeCompare(second, 'zh-CN', { numeric: true })
+}
+
+type UpdateCheck = {
+  currentVersion: string
+  latestVersion: string | null
+  releaseUrl: string | null
+  releaseName: string | null
+  publishedAt: string | null
+  updateAvailable: boolean
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function groupReferences(references: ReferenceCandidate[]): ReferenceGroup[] {
@@ -162,6 +184,10 @@ function blocksForClaim(root: HTMLElement, claimNumber: number) {
   return collected
 }
 
+function claimIssueSeverityRank(severity: ClaimIssue['severity']) {
+  return severity === '重要' ? 0 : severity === '一般' ? 1 : 2
+}
+
 function compactQuote(value: string) {
   return value.replace(/\s+/g, '')
 }
@@ -224,6 +250,8 @@ function App() {
   const [confirmedMappings, setConfirmedMappings] = useState<Record<string, string>>({})
   const [mappingConfirmed, setMappingConfirmed] = useState(false)
   const [activeReference, setActiveReference] = useState<string | null>(null)
+  const [activeReferenceOccurrence, setActiveReferenceOccurrence] = useState(0)
+  const [referenceOccurrenceCount, setReferenceOccurrenceCount] = useState(0)
   const [figureStatus, setFigureStatus] = useState<'idle' | 'scanning' | 'done' | 'error'>('idle')
   const [figureProgress, setFigureProgress] = useState({ finished: 0, total: 0 })
   const [figureLabels, setFigureLabels] = useState<FigureLabel[]>([])
@@ -232,10 +260,18 @@ function App() {
   const [ocrDraft, setOcrDraft] = useState<OcrSettingsStore>(getStoredOcrSettings)
   const [rememberOcrSettings, setRememberOcrSettings] = useState(true)
   const [isOcrSettingsOpen, setIsOcrSettingsOpen] = useState(false)
+  const [paddlePluginStatus, setPaddlePluginStatus] = useState<PatentOcrPluginStatus | null>(null)
+  const [isInstallingPaddlePlugin, setIsInstallingPaddlePlugin] = useState(false)
   const [cloudOcrUsage, setCloudOcrUsage] = useState<CloudOcrUsage | null>(null)
   const [isAssociationCollapsed, setIsAssociationCollapsed] = useState(false)
   const [isClaimBasisCollapsed, setIsClaimBasisCollapsed] = useState(false)
+  const [isClaimBasisShowAll, setIsClaimBasisShowAll] = useState(false)
+  const [isClaimBasisLowRiskOpen, setIsClaimBasisLowRiskOpen] = useState(false)
+  const [isClaimBasisPassedOpen, setIsClaimBasisPassedOpen] = useState(false)
+  const [expandedClaimIssueIds, setExpandedClaimIssueIds] = useState<Set<string>>(() => new Set())
   const [activeClaimIssueId, setActiveClaimIssueId] = useState<string | null>(null)
+  const [activeClaimIssueOccurrence, setActiveClaimIssueOccurrence] = useState(0)
+  const [claimIssueOccurrenceCount, setClaimIssueOccurrenceCount] = useState(0)
   const [ratings, setRatings] = useState<PatentRatings>(emptyRatings)
   const [isLlmReviewOpen, setIsLlmReviewOpen] = useState(false)
   const [isAuthorQrOpen, setIsAuthorQrOpen] = useState(false)
@@ -245,6 +281,10 @@ function App() {
   const [expandedFigureScale, setExpandedFigureScale] = useState(1)
   const [notice, setNotice] = useState('')
   const [isOpening, setIsOpening] = useState(false)
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null)
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false)
+  const [isExitConfirmOpen, setIsExitConfirmOpen] = useState(false)
+  const [isSavingBeforeExit, setIsSavingBeforeExit] = useState(false)
   const readingRef = useRef<HTMLElement>(null)
   const figuresRef = useRef<HTMLDivElement>(null)
   const labelPositionsRef = useRef<Record<string, { left: number; top: number }>>({})
@@ -270,7 +310,122 @@ function App() {
     return selected
   }, [confirmedMappings, mappingConfirmed, mappingSelections, referenceGroups])
   const claimBasisAnalysis = useMemo(() => analyzeClaimAntecedentBasis(file?.text ?? ''), [file])
+  const claimBasisVisibleIssues = useMemo(
+    () => claimBasisAnalysis.issues
+      .filter((issue) => isClaimBasisShowAll || issue.severity !== '提示')
+      .sort((first, second) => first.claimNumber - second.claimNumber || claimIssueSeverityRank(first.severity) - claimIssueSeverityRank(second.severity) || first.highlightText.localeCompare(second.highlightText, 'zh-CN')),
+    [claimBasisAnalysis.issues, isClaimBasisShowAll],
+  )
+  const claimBasisIssueGroups = useMemo(() => {
+    const byClaim = new Map<number, ClaimIssue[]>()
+    claimBasisVisibleIssues.forEach((issue) => byClaim.set(issue.claimNumber, [...(byClaim.get(issue.claimNumber) ?? []), issue]))
+    return [...byClaim.entries()].map(([claimNumber, issues]) => ({ claimNumber, issues }))
+  }, [claimBasisVisibleIssues])
+  const claimBasisLowRiskIssues = useMemo(() => claimBasisAnalysis.issues.filter((issue) => issue.severity === '提示'), [claimBasisAnalysis.issues])
+  const claimBasisPassedClaims = useMemo(() => {
+    const withRisk = new Set(claimBasisAnalysis.issues.map((issue) => issue.claimNumber))
+    return claimBasisAnalysis.claims.filter((claim) => !withRisk.has(claim.number)).map((claim) => claim.number)
+  }, [claimBasisAnalysis])
   const isDesktop = Boolean(window.patentReader)
+
+  async function downloadUserGuide() {
+    try {
+      if (window.patentReader?.saveUserGuide) {
+        const result = await window.patentReader.saveUserGuide()
+        if (result.saved && result.path) setNotice(`使用指南已保存到：${result.path}`)
+        return
+      }
+      const link = document.createElement('a')
+      link.href = '/guides/专利阅研使用指南.html'
+      link.download = '专利阅研使用指南.html'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      setNotice('使用指南已开始下载。')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : `下载使用指南失败：${String(error)}`)
+    }
+  }
+
+  async function checkForUpdate(showNotice = true) {
+    if (!window.patentReader?.checkForUpdate) {
+      if (showNotice) setNotice('当前程序暂不支持在线检查更新；请升级到新版 Windows 客户端。')
+      return
+    }
+    setIsCheckingUpdate(true)
+    try {
+      const result = await window.patentReader.checkForUpdate()
+      setUpdateCheck(result)
+      if (result.updateAvailable) {
+        setNotice(`发现新版本 ${result.latestVersion}，点击“更新”即可打开下载页面。`)
+      } else if (showNotice) {
+        setNotice('当前已是最新版本。')
+      }
+    } catch (error) {
+      if (showNotice) setNotice(error instanceof Error ? error.message : `检查更新失败：${String(error)}`)
+    } finally {
+      setIsCheckingUpdate(false)
+    }
+  }
+
+  async function handleUpdateAction() {
+    if (updateCheck?.updateAvailable && updateCheck.releaseUrl) {
+      try {
+        if (window.patentReader?.openExternalUrl) await window.patentReader.openExternalUrl(updateCheck.releaseUrl)
+        else window.open(updateCheck.releaseUrl, '_blank', 'noopener,noreferrer')
+        setNotice(`已在浏览器打开 ${updateCheck.latestVersion} 的下载页面。`)
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : `无法打开更新下载页：${String(error)}`)
+      }
+      return
+    }
+    await checkForUpdate(true)
+  }
+
+  useEffect(() => {
+    void checkForUpdate(false)
+  }, [])
+
+  async function refreshPaddlePluginStatus() {
+    if (!window.patentReader?.ocrPluginStatus) {
+      setPaddlePluginStatus({
+        installed: false,
+        id: 'paddle-ocr-mobile',
+        displayName: '本机 PaddleOCR 3（增强插件）',
+        version: '',
+        message: '当前程序不支持 OCR 插件管理；请使用新版 Windows 客户端。',
+      })
+      return
+    }
+    try {
+      setPaddlePluginStatus(await window.patentReader.ocrPluginStatus())
+    } catch (error) {
+      setPaddlePluginStatus({
+        installed: false,
+        id: 'paddle-ocr-mobile',
+        displayName: '本机 PaddleOCR 3（增强插件）',
+        version: '',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  async function installPaddlePlugin() {
+    if (!window.patentReader?.installPaddleOcrPlugin) {
+      setNotice('当前程序不支持 OCR 插件安装；请使用新版 Windows 客户端。')
+      return
+    }
+    setIsInstallingPaddlePlugin(true)
+    try {
+      const status = await window.patentReader.installPaddleOcrPlugin()
+      setPaddlePluginStatus(status)
+      setNotice(`已安装 ${status.displayName}${status.version ? ` ${status.version}` : ''}；可切换为本机 OCR。`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : `安装 OCR 插件失败：${String(error)}`)
+    } finally {
+      setIsInstallingPaddlePlugin(false)
+    }
+  }
 
   function clearLockedSelection() {
     window.getSelection()?.removeAllRanges()
@@ -336,6 +491,7 @@ function App() {
   }, [figureStatus, mappingConfirmed])
 
   // Confirmed mappings are applied to the text as real visual highlights, not merely scrolled to.
+  // Individual highlights stay in reading order so a figure label can browse each occurrence.
   useEffect(() => {
     const root = readingRef.current
     if (!root) return
@@ -343,14 +499,25 @@ function App() {
     root.querySelectorAll<HTMLElement>('.reference-block-highlight').forEach((block) => block.classList.remove('reference-block-highlight'))
     root.querySelectorAll<HTMLElement>('.reference-page-highlight').forEach((page) => page.classList.remove('reference-page-highlight'))
     root.querySelectorAll<HTMLElement>('.reference-text-highlight').forEach((item) => item.classList.remove('reference-text-highlight'))
-    if (!mappingConfirmed || !activeReference) return
+    if (!mappingConfirmed || !activeReference) {
+      setReferenceOccurrenceCount(0)
+      setActiveReferenceOccurrence(0)
+      return
+    }
     const reference = references.find((item) => item.id === activeReference)
-    if (!reference) return
+    if (!reference) {
+      setReferenceOccurrenceCount(0)
+      return
+    }
 
     if (file?.extension === 'pdf') {
       const compactId = reference.id.replace(/\s+/g, '')
-      const matchingPage = file.pdfPages.find((page) => page.text.replace(/\s+/g, '').includes(compactId))
-        ?? file.pdfPages.find((page) => page.text.includes(reference.name) && page.text.includes(reference.number))
+      const matchingPages = file.pdfPages.filter((page) => page.text.replace(/\s+/g, '').includes(compactId))
+      const fallbackPages = matchingPages.length ? matchingPages : file.pdfPages.filter((page) => page.text.includes(reference.name) && page.text.includes(reference.number))
+      setReferenceOccurrenceCount(fallbackPages.length)
+      const occurrence = Math.max(0, Math.min(activeReferenceOccurrence, fallbackPages.length - 1))
+      if (occurrence !== activeReferenceOccurrence) setActiveReferenceOccurrence(occurrence)
+      const matchingPage = fallbackPages[occurrence]
       const pageElement = matchingPage
         ? root.querySelector<HTMLElement>(`.pdf-page-shell[data-page-number="${matchingPage.pageNumber}"]`)
         : null
@@ -362,7 +529,9 @@ function App() {
             item.classList.add('reference-text-highlight')
           }
         })
-        pageElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        const scroller = pageElement.closest<HTMLElement>('.text-reader')
+        if (scroller) scrollTargetWithin(pageElement, scroller)
+        else pageElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
       }
       return
     }
@@ -371,28 +540,46 @@ function App() {
     const matchingBlocks = blocks.filter((block) => block.textContent?.includes(reference.name) && block.textContent.includes(reference.number))
     matchingBlocks.forEach((block) => block.classList.add('reference-block-highlight'))
 
+    const expression = new RegExp(`${escapeRegExp(reference.name)}\\s*${escapeRegExp(reference.number)}(?![A-Za-z0-9])`, 'g')
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
     const textNodes: Text[] = []
     let node = walker.nextNode()
     while (node) {
-      if (node.textContent?.includes(reference.id)) textNodes.push(node as Text)
+      if (node.textContent?.match(expression)) textNodes.push(node as Text)
       node = walker.nextNode()
     }
+    const marks: HTMLElement[] = []
     textNodes.forEach((textNode) => {
-      const start = textNode.textContent?.indexOf(reference.id) ?? -1
-      if (start < 0) return
-      const range = document.createRange()
-      range.setStart(textNode, start)
-      range.setEnd(textNode, start + reference.id.length)
-      const mark = document.createElement('mark')
-      mark.dataset.referenceHighlight = 'true'
-      mark.className = 'reference-highlight'
-      range.surroundContents(mark)
+      const matches = [...(textNode.textContent ?? '').matchAll(expression)]
+      const nodeMarks: HTMLElement[] = []
+      for (let index = matches.length - 1; index >= 0; index -= 1) {
+        const match = matches[index]
+        if (match.index === undefined) continue
+        const range = document.createRange()
+        range.setStart(textNode, match.index)
+        range.setEnd(textNode, match.index + match[0].length)
+        const mark = document.createElement('mark')
+        mark.dataset.referenceHighlight = 'true'
+        mark.className = 'reference-highlight'
+        range.surroundContents(mark)
+        // Ranges are wrapped from right to left so their offsets remain valid.
+        // Keep a node-local list, then append it, to retain global document order.
+        nodeMarks.unshift(mark)
+      }
+      marks.push(...nodeMarks)
     })
 
-    const target = root.querySelector<HTMLElement>('[data-reference-highlight], .reference-block-highlight')
-    target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }, [activeReference, file, mappingConfirmed, references, stage])
+    const targets = marks.length ? marks : matchingBlocks
+    setReferenceOccurrenceCount(targets.length)
+    const occurrence = Math.max(0, Math.min(activeReferenceOccurrence, targets.length - 1))
+    if (occurrence !== activeReferenceOccurrence) setActiveReferenceOccurrence(occurrence)
+    const target = targets[occurrence]
+    if (target) {
+      const scroller = target.closest<HTMLElement>('.text-reader')
+      if (scroller) scrollTargetWithin(target, scroller)
+      else target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [activeReference, activeReferenceOccurrence, file, mappingConfirmed, references, stage])
 
   // Claim-basis findings are marked at term level so a single diagnostic does
   // not visually imply that the entire claim is defective.
@@ -401,7 +588,10 @@ function App() {
     if (!root) return
     root.querySelectorAll<HTMLElement>('[data-claim-issue-highlight]').forEach((mark) => mark.replaceWith(document.createTextNode(mark.textContent ?? '')))
     root.querySelectorAll<HTMLElement>('.claim-issue-text-highlight').forEach((item) => item.classList.remove('claim-issue-text-highlight'))
-    if (!activeClaimIssueId) return
+    if (!activeClaimIssueId) {
+      setClaimIssueOccurrenceCount(0)
+      return
+    }
     const issue = claimBasisAnalysis.issues.find((item) => item.id === activeClaimIssueId)
     if (!issue) return
     const claimStartPattern = new RegExp(`^\\s*${issue.claimNumber}\\s*[.．、]`)
@@ -409,40 +599,59 @@ function App() {
       const page = file.pdfPages.find((candidate) => claimStartPattern.test(candidate.text))
       const pageElement = page ? root.querySelector<HTMLElement>(`.pdf-page-shell[data-page-number="${page.pageNumber}"]`) : null
       if (pageElement) {
-        pageElement.querySelectorAll<HTMLElement>('.pdf-text-item').forEach((item) => {
-          if (item.textContent?.includes(issue.highlightText)) item.classList.add('claim-issue-text-highlight')
-        })
-        pageElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        const targets = [...pageElement.querySelectorAll<HTMLElement>('.pdf-text-item')]
+          .filter((item) => item.textContent?.includes(issue.highlightText))
+        setClaimIssueOccurrenceCount(targets.length)
+        const occurrence = Math.max(0, Math.min(activeClaimIssueOccurrence, Math.max(0, targets.length - 1)))
+        if (occurrence !== activeClaimIssueOccurrence) setActiveClaimIssueOccurrence(occurrence)
+        targets.forEach((item, index) => item.classList.toggle('claim-issue-text-highlight', index === occurrence))
+        const target = targets[occurrence]
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        else pageElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
       }
       return
     }
     const blocks = blocksForClaim(root, issue.claimNumber)
+    const marks: HTMLElement[] = []
     for (const block of blocks) {
+      const blockMarks: HTMLElement[] = []
       const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT)
+      const nodes: Text[] = []
       let node = walker.nextNode()
-      let highlighted = false
       while (node) {
-        const textNode = node as Text
-        const start = textNode.textContent?.indexOf(issue.highlightText) ?? -1
-        if (start >= 0) {
+        nodes.push(node as Text)
+        node = walker.nextNode()
+      }
+      for (const textNode of nodes) {
+        const text = textNode.textContent ?? ''
+        const starts: number[] = []
+        let start = text.indexOf(issue.highlightText)
+        while (start >= 0) {
+          starts.push(start)
+          start = text.indexOf(issue.highlightText, start + issue.highlightText.length)
+        }
+        for (const matchStart of starts.reverse()) {
           const range = document.createRange()
-          range.setStart(textNode, start)
-          range.setEnd(textNode, start + issue.highlightText.length)
+          range.setStart(textNode, matchStart)
+          range.setEnd(textNode, matchStart + issue.highlightText.length)
           const mark = document.createElement('mark')
           mark.dataset.claimIssueHighlight = 'true'
           mark.className = 'claim-issue-inline-highlight'
           range.surroundContents(mark)
-          highlighted = true
-          break
+          blockMarks.unshift(mark)
         }
-        node = walker.nextNode()
       }
-      if (highlighted) {
-        block.scrollIntoView({ behavior: 'smooth', block: 'center' })
-        break
-      }
+      marks.push(...blockMarks)
     }
-  }, [activeClaimIssueId, claimBasisAnalysis, file, stage])
+    setClaimIssueOccurrenceCount(marks.length)
+    const occurrence = Math.max(0, Math.min(activeClaimIssueOccurrence, Math.max(0, marks.length - 1)))
+    if (occurrence !== activeClaimIssueOccurrence) setActiveClaimIssueOccurrence(occurrence)
+    const target = marks[occurrence]
+    if (target) {
+      target.classList.add('active')
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [activeClaimIssueId, activeClaimIssueOccurrence, claimBasisAnalysis, file, stage])
 
   useEffect(() => {
     const root = figuresRef.current
@@ -472,18 +681,15 @@ function App() {
         const progress = (finished: number, total: number) => {
           if (!cancelled) setFigureProgress({ finished, total })
         }
-        let rawLabels: FigureLabel[]
-        if (ocrSettings.provider === 'local') {
-          rawLabels = await import('./figure-ocr').then(({ recognizeFigureLabels }) => recognizeFigureLabels(images, progress, knownNumbers))
-        } else {
-          const cloudResult = await recognizeCloudFigureLabels(images, ocrSettings, knownNumbers, progress)
-          rawLabels = cloudResult.labels
-          setCloudOcrUsage({
-            provider: ocrSettings.provider,
-            imageCount: cloudResult.imageCount,
-            wordCount: cloudResult.wordCount,
-          })
-        }
+        const cloudResult = ocrSettings.provider === 'local'
+          ? { labels: await recognizeFigureLabels(images, progress, knownNumbers), wordCount: 0, imageCount: images.length }
+          : await recognizeCloudFigureLabels(images, ocrSettings, knownNumbers, progress)
+        const rawLabels = cloudResult.labels
+        setCloudOcrUsage({
+          provider: ocrSettings.provider,
+          imageCount: cloudResult.imageCount,
+          wordCount: cloudResult.wordCount,
+        })
         if (cancelled) return
         const recognizedLabels = uniqueFigureLabels(suppressOverlappingSubnumberLabels(
           rawLabels.filter((label) => selectedReferences.has(label.number)),
@@ -520,6 +726,7 @@ function App() {
           })
           badge.append(labelButton, dismissButton)
           bindFigureLabelInteractions(badge, figure, labelKey, labelPositionsRef, () => {
+            setActiveReferenceOccurrence(0)
             setActiveReference(reference.id)
             setMode('review')
           })
@@ -561,16 +768,37 @@ function App() {
       setNotice('请先确认“标号—待选特征”映射，再应用跳转与高亮。')
       return
     }
+    setActiveReferenceOccurrence(0)
     setActiveReference(reference.id)
     setMode('review')
     setNotice(`已定位并高亮：${reference.name} ${reference.number}`)
   }
 
+  function navigateReferenceOccurrence(direction: -1 | 1) {
+    if (referenceOccurrenceCount < 2) return
+    setActiveReferenceOccurrence((current) => cycleReferenceOccurrence(current, referenceOccurrenceCount, direction))
+  }
+
   function navigateToClaimIssue(issue: ClaimIssue) {
     setActiveClaimIssueId(issue.id)
+    setActiveClaimIssueOccurrence(0)
     setActiveSection('claims')
     setMode('review')
     setNotice(`已定位权利要求 ${issue.claimNumber}：${issue.message}`)
+  }
+
+  function navigateClaimIssueOccurrence(direction: -1 | 1) {
+    if (claimIssueOccurrenceCount < 2) return
+    setActiveClaimIssueOccurrence((current) => cycleReferenceOccurrence(current, claimIssueOccurrenceCount, direction))
+  }
+
+  function toggleClaimIssueDetails(issueId: string) {
+    setExpandedClaimIssueIds((current) => {
+      const next = new Set(current)
+      if (next.has(issueId)) next.delete(issueId)
+      else next.add(issueId)
+      return next
+    })
   }
 
   function chooseCandidate(number: string, id: string) {
@@ -631,7 +859,11 @@ function App() {
 
   function applyOcrSettings() {
     const draft = activeOcrSettings(ocrDraft)
-    if (draft.provider !== 'local' && !draft.apiKey.trim()) {
+    if (draft.provider === 'paddle-local' && !paddlePluginStatus?.installed) {
+      setNotice('请先安装“本机 PaddleOCR 3（增强插件）”。')
+      return
+    }
+    if (draft.provider !== 'local' && draft.provider !== 'paddle-local' && !draft.apiKey.trim()) {
       setNotice('请先填写所选云 OCR 的 API Key。')
       return
     }
@@ -651,7 +883,7 @@ function App() {
     setFigureLabels([])
     setIsAssociationCollapsed(false)
     setIsOcrSettingsOpen(false)
-    setNotice(draft.provider === 'local'
+    setNotice(draft.provider === 'local' || draft.provider === 'paddle-local'
       ? '已切换为完全本机 OCR。'
       : `已启用 ${draft.provider === 'custom' ? draft.interfaceName : ocrProviderLabels[draft.provider]}；只会上传右侧附图进行识别。`)
   }
@@ -664,6 +896,7 @@ function App() {
       ) as OcrSettingsStore['profiles'],
     })
     setIsOcrSettingsOpen(true)
+    void refreshPaddlePluginStatus()
   }
 
   async function openOcrApiLink(provider: OcrProvider) {
@@ -688,6 +921,7 @@ function App() {
     setIsAssociationCollapsed(false)
     setMode('review')
     const first = referenceGroups[0]?.options.find((item) => item.id === resolved[referenceGroups[0].number]) ?? referenceGroups[0]?.options[0]
+    setActiveReferenceOccurrence(0)
     setActiveReference(first?.id ?? null)
     setNotice(`已确认 ${referenceGroups.length} 个标号映射，正在应用到全文和附图。`)
   }
@@ -706,6 +940,7 @@ function App() {
       let html = ''
       let text = ''
       let markers: string[] = []
+      let pageCount = 0
       let previewUrl: string | null = null
       let pdfPages: PdfPageData[] = []
       if (selected.extension === 'docx') {
@@ -713,16 +948,18 @@ function App() {
         html = parsed.html
         text = parsed.plainText
         markers = parsed.markers
+        pageCount = parsed.pageCount
       } else {
         const parsed = await parsePdf(bytes)
         text = parsed.plainText
         markers = parsed.markers
+        pageCount = parsed.pages.length
         pdfPages = parsed.pages
       }
       const foundSections = detectSections(text, markers)
       const candidates = extractReferenceCandidates(text)
       const groups = groupReferences(candidates)
-      setFile({ ...selected, html, text, markers, previewUrl, pdfPages, sections: foundSections })
+      setFile({ ...selected, html, text, markers, pageCount, previewUrl, pdfPages, sections: foundSections })
       setSections(foundSections)
       setReferences(candidates)
       setRemovedNumbers([])
@@ -735,6 +972,8 @@ function App() {
       setIsClaimBasisCollapsed(false)
       setActiveClaimIssueId(null)
       setActiveReference(null)
+      setActiveReferenceOccurrence(0)
+      setReferenceOccurrenceCount(0)
       setActiveSection('description')
       setMode('reading')
       setAnnotations([])
@@ -912,8 +1151,9 @@ function App() {
     window.localStorage.setItem('patent-reader.annotation-author', value)
   }
 
-  async function saveRevision() {
-    if (!file || !window.patentReader) return
+  async function saveRevision(): Promise<boolean> {
+    if (!file || !window.patentReader) return false
+    try {
     const payload: PatentAnnotation[] = annotations.map((item) => ({
       type: item.type,
       severity: item.severity,
@@ -941,29 +1181,20 @@ function App() {
         selectionAnchor: null,
       })
     }
-    const acceptedLlmFindings = llmFindings.filter((finding) => finding.accepted)
+    const acceptedLlmFindings = LLM_REVIEW_ENABLED ? llmFindings.filter((finding) => finding.accepted) : []
     acceptedLlmFindings.forEach((finding) => {
-      const sources = finding.sources
-        .map((source) => `${source.title}${source.url ? `：${source.url}` : ''}`)
-        .join('\n')
       payload.push({
         type: 'LLM辅助审查',
         severity: finding.severity,
         status: '已采纳',
         author: annotationAuthor.trim() || '专利阅研',
-        body: [
-          `【${finding.title}｜${finding.evidenceLevel}】`,
-          finding.analysis,
-          `建议：${finding.recommendation}`,
-          sources ? `来源：\n${sources}` : '',
-          '提示：本意见由LLM辅助生成，不构成法律意见。',
-        ].filter(Boolean).join('\n'),
+        body: `风险类型：${finding.title.trim() || finding.module}（详情看附件excel）`,
         location: finding.location,
         selectedText: finding.quote || null,
         selectionAnchor: file.extension === 'pdf' ? pdfAnchorForQuote(file.pdfPages, finding.quote) : null,
       })
     })
-    const llmReport: PatentLlmReviewReportPayload | null = llmRunMetadata && llmFindings.length ? {
+    const llmReport: PatentLlmReviewReportPayload | null = LLM_REVIEW_ENABLED && llmRunMetadata && llmFindings.length ? {
       technicalField: llmRunMetadata.technicalField,
       rulebookVersion: reviewRulebook.metadata.version,
       rulebookVerifiedAt: reviewRulebook.metadata.lastVerifiedAt,
@@ -983,11 +1214,27 @@ function App() {
         accepted: finding.accepted,
       })),
     } : null
+    const claimBasisReport: PatentClaimBasisReportPayload | null = claimBasisAnalysis.claims.length
+      ? {
+        totalClaims: claimBasisAnalysis.claims.length,
+        issues: claimBasisAnalysis.issues
+          .filter((issue) => issue.severity !== '提示')
+          .map((issue) => ({
+            claimNumber: issue.claimNumber,
+            severity: issue.severity,
+            term: issue.highlightText,
+            conclusion: issue.conclusion,
+            message: issue.message,
+            sources: issue.sources.map((source) => `权${source.claimNumber}“${source.term}”${source.preamble ? '（前序）' : ''}`).join('；'),
+            paths: issue.paths.map((path) => path.map((number) => `权${number}`).join(' → ')).join('；'),
+          })),
+      }
+      : null
     const result = await window.patentReader.saveRevision(file.path, payload, {
       technicalUnderstanding: ratings.technicalUnderstanding,
       communication: ratings.communication,
       patentQuality: ratings.patentQuality,
-    }, llmReport)
+    }, llmReport, claimBasisReport)
     const details = [
       annotations.length ? `${annotations.length} 条人工批注` : '',
       acceptedLlmFindings.length ? `${acceptedLlmFindings.length} 条LLM采纳意见` : '',
@@ -998,15 +1245,75 @@ function App() {
     setNotice(details
       ? `已生成修订版并写入${details}：${result.revisionPath}${ratingNotice}${reviewNotice}`
       : `已生成修订版：${result.revisionPath}${ratingNotice}${reviewNotice}`)
+      return true
+    } catch (error) {
+      setNotice(error instanceof Error ? `保存修订版失败：${error.message}` : `保存修订版失败：${String(error)}`)
+      return false
+    }
+  }
+
+  async function exitApplication() {
+    try {
+      if (window.patentReader?.exitApp) {
+        await window.patentReader.exitApp()
+        return true
+      }
+      window.close()
+      return true
+    } catch (error) {
+      setNotice(error instanceof Error ? `退出失败：${error.message}` : `退出失败：${String(error)}`)
+      return false
+    }
+  }
+
+  async function saveRevisionAndExit() {
+    setIsSavingBeforeExit(true)
+    const saved = await saveRevision()
+    const exited = saved && await exitApplication()
+    if (!exited) setIsSavingBeforeExit(false)
+  }
+
+  useEffect(() => {
+    if (!window.patentReader?.onExitRequested) return
+    let unlisten: (() => void) | undefined
+    let disposed = false
+    void window.patentReader.onExitRequested(() => {
+      if (!file) {
+        void exitApplication()
+        return
+      }
+      if (!isSavingBeforeExit) setIsExitConfirmOpen(true)
+    }).then((dispose) => {
+      if (disposed) dispose()
+      else unlisten = dispose
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [file, isSavingBeforeExit])
+
+  function cancelExitConfirmation() {
+    if (!isSavingBeforeExit) setIsExitConfirmOpen(false)
+  }
+
+  async function exitWithoutSaving() {
+    setIsSavingBeforeExit(true)
+    const exited = await exitApplication()
+    if (!exited) setIsSavingBeforeExit(false)
   }
 
   if (stage === 'welcome') return <>
-    <Welcome isOpening={isOpening} notice={notice} onOpen={() => { void openDocument(false) }} onFollowAuthor={() => setIsAuthorQrOpen(true)} desktop={isDesktop} />
+    <Welcome isOpening={isOpening} isCheckingUpdate={isCheckingUpdate} notice={notice} onOpen={() => { void openDocument(false) }} onDownloadGuide={() => { void downloadUserGuide() }} onFollowAuthor={() => setIsAuthorQrOpen(true)} onUpdate={() => { void handleUpdateAction() }} updateAvailable={Boolean(updateCheck?.updateAvailable)} desktop={isDesktop} />
     {isAuthorQrOpen && <AuthorQrDialog onClose={() => setIsAuthorQrOpen(false)} />}
+    {isExitConfirmOpen && <ExitConfirmDialog isSaving={isSavingBeforeExit} onCancel={cancelExitConfirmation} onExitWithoutSaving={() => { void exitWithoutSaving() }} onSaveAndExit={() => { void saveRevisionAndExit() }} />}
   </>
 
   if (stage === 'structure' && file) {
-    return <StructureConfirm file={file} sections={sections} detectedCount={detectedCount} onBack={() => setStage('welcome')} onUpdate={updateSectionStart} onConfirm={() => setStage('workspace')} />
+    return <>
+      <StructureConfirm file={file} sections={sections} detectedCount={detectedCount} onBack={() => setStage('welcome')} onUpdate={updateSectionStart} onConfirm={() => setStage('workspace')} />
+      {isExitConfirmOpen && <ExitConfirmDialog isSaving={isSavingBeforeExit} onCancel={cancelExitConfirmation} onExitWithoutSaving={() => { void exitWithoutSaving() }} onSaveAndExit={() => { void saveRevisionAndExit() }} />}
+    </>
   }
 
   if (!file) return null
@@ -1020,7 +1327,7 @@ function App() {
       <header className="app-header">
         <BrandWithAuthor onFollowAuthor={() => setIsAuthorQrOpen(true)} />
         <div className="document-title"><FileText size={16} /><span>{file.name}</span><span className="analysis-pill"><Sparkles size={13} /> 本地分析就绪</span></div>
-        <div className="header-actions"><button type="button" className="header-option-button llm-header-button" onClick={() => setIsLlmReviewOpen(true)} title="打开LLM辅助审查"><Sparkles size={17} /><span>LLM 审查{llmFindings.length ? ` · ${llmFindings.length}` : ''}</span></button><button type="button" className="header-option-button" onClick={openOcrSettings} title="设置 OCR 识别方式" aria-label={`OCR 设置，当前为${ocrDisplayName}`}><Cloud size={17} /><span>{ocrDisplayName}</span></button><button type="button" className="header-icon-button" onClick={() => { void openDocument(true) }} disabled={isOpening} title="打开新文档" aria-label="打开新文档"><FolderOpen size={18} /></button><button className="quiet-button" onClick={() => setStage('structure')}>文档结构</button><button className="primary-button" onClick={saveRevision}><Save size={16} /> 保存修订版</button></div>
+        <div className="header-actions"><button type="button" className={`header-option-button ${updateCheck?.updateAvailable ? 'has-update' : ''}`} onClick={() => { void handleUpdateAction() }} disabled={isCheckingUpdate} title={updateCheck?.updateAvailable ? `下载新版本 ${updateCheck.latestVersion}` : '检查软件更新'}><RefreshCw size={17} className={isCheckingUpdate ? 'spinning-icon' : ''} /><span>{isCheckingUpdate ? '检查中…' : updateCheck?.updateAvailable ? `更新 ${updateCheck.latestVersion}` : '检查更新'}</span></button>{LLM_REVIEW_ENABLED && <button type="button" className="header-option-button llm-header-button" onClick={() => setIsLlmReviewOpen(true)} title="打开LLM辅助审查"><Sparkles size={17} /><span>LLM 审查{llmFindings.length ? ` · ${llmFindings.length}` : ''}</span></button>}<button type="button" className="header-option-button" onClick={openOcrSettings} title="设置 OCR 识别方式" aria-label={`OCR 设置，当前为${ocrDisplayName}`}><Cloud size={17} /><span>{ocrDisplayName}</span></button><button type="button" className="header-icon-button" onClick={() => { void openDocument(true) }} disabled={isOpening} title="打开新文档" aria-label="打开新文档"><FolderOpen size={18} /></button><button className="quiet-button" onClick={() => setStage('structure')}>文档结构</button><button className="primary-button" onClick={saveRevision}><Save size={16} /> 保存修订版</button></div>
       </header>
       <div className={`workspace ${isSectionNavCollapsed ? 'nav-collapsed' : ''}`}>
         <nav className={`section-nav ${isSectionNavCollapsed ? 'collapsed' : ''}`} aria-label="文档区段">
@@ -1032,14 +1339,14 @@ function App() {
               const section = sections.find((item) => item.key === key)
               return <button key={key} className={`section-link ${activeSection === key ? 'selected' : ''}`} onClick={() => navigateToSection(key)}>{key === 'drawings' ? <Image size={17} /> : <FileText size={17} />} {section?.label}{section?.start && <span className="position-dot">已识别</span>}</button>
             })}
-            <div className="nav-spacer" /><div className="privacy-note">正文与批注仅在本机处理<br />{ocrSettings.provider === 'local' ? '云端增强未启用' : `仅附图启用 ${ocrProviderLabels[ocrSettings.provider]}`}</div>
+            <div className="nav-spacer" /><div className="privacy-note">正文与批注仅在本机处理<br />{ocrSettings.provider === 'local' || ocrSettings.provider === 'paddle-local' ? '云端增强未启用' : `仅附图启用 ${ocrProviderLabels[ocrSettings.provider]}`}</div>
           </>}
         </nav>
 
         <section className="reading-pane">
           <div className="pane-toolbar"><div><span className="eyebrow">{mode === 'reading' ? '理解模式' : '审阅模式'}</span><h1>{sections.find((item) => item.key === activeSection)?.label}</h1></div><div className="mode-tabs"><button className={mode === 'reading' ? 'active' : ''} onClick={() => setMode('reading')}>阅读</button><button className={mode === 'review' ? 'active' : ''} onClick={() => setMode('review')}>审阅</button></div></div>
           <div className="dual-reader">
-            <section className="text-reader"><div className="reader-subheader"><FileText size={15} /> 全文阅读 <span>{file.extension === 'pdf' ? `${pdfTextPages.length} 页` : ''}</span></div>{file.extension === 'pdf'
+            <section className="text-reader"><div className="reader-subheader"><FileText size={15} /> 全文阅读 <span>{file.extension === 'pdf' ? `${pdfTextPages.length} 页` : ''}</span>{mappingConfirmed && activeReference && <div className="reference-navigation" aria-label="同一特征定位"><strong>{references.find((reference) => reference.id === activeReference)?.name} {references.find((reference) => reference.id === activeReference)?.number}</strong><span>{referenceOccurrenceCount ? `${activeReferenceOccurrence + 1}/${referenceOccurrenceCount}` : '定位中…'}</span><button type="button" onClick={() => navigateReferenceOccurrence(-1)} disabled={referenceOccurrenceCount < 2} title="上一个相同特征" aria-label="上一个相同特征"><ArrowUp size={15} /></button><button type="button" onClick={() => navigateReferenceOccurrence(1)} disabled={referenceOccurrenceCount < 2} title="下一个相同特征" aria-label="下一个相同特征"><ArrowDown size={15} /></button><button type="button" className="reference-navigation-close" onClick={() => setActiveReference(null)} title="关闭定位" aria-label="关闭定位"><X size={14} /></button></div>}</div>{file.extension === 'pdf'
               ? <article ref={readingRef} className="pdf-reading-pages" onMouseUp={captureSelection}>{pdfTextPages.map((page) => <PdfPageView key={page.pageNumber} page={page} selectable selectionRects={selectionAnchor?.pdfRects?.filter((rect) => rect.pageNumber === page.pageNumber) ?? []} />)}</article>
               : <div className="docx-reading-shell"><article ref={readingRef} className="docx-reading" onMouseUp={captureSelection} dangerouslySetInnerHTML={{ __html: file.html || '<p>文档正文为空。</p>' }} />{docxSelectionHighlights.length > 0 && <div className="persistent-selection-overlays" aria-hidden="true">{docxSelectionHighlights.map((highlight, index) => <span key={`${highlight.left}-${highlight.top}-${index}`} className="persistent-selection-highlight" style={{ left: highlight.left, top: highlight.top, width: highlight.width, height: highlight.height }} />)}</div>}</div>}</section>
             <section className="figures-reader"><div className="reader-subheader"><Image size={15} /> 全部附图 <span>{figureLabels.length ? `${figureLabels.length} 个已标注` : '确认映射后标注'}</span></div><div ref={figuresRef} className="figure-gallery">{file.extension === 'pdf'
@@ -1081,21 +1388,33 @@ function App() {
               <button type="button" className="claim-basis-collapse" onClick={() => setIsClaimBasisCollapsed((current) => !current)} aria-label={isClaimBasisCollapsed ? '展开引用基础判断' : '收起引用基础判断'} title={isClaimBasisCollapsed ? '展开' : '收起'}>{isClaimBasisCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}</button>
             </div>
             {isClaimBasisCollapsed
-              ? <button type="button" className="claim-basis-summary" onClick={() => setIsClaimBasisCollapsed(false)}><AlertTriangle size={14} /><span>{claimBasisAnalysis.claims.length ? `已校验 ${claimBasisAnalysis.claims.length} 项权利要求${claimBasisAnalysis.issues.length ? `，发现 ${claimBasisAnalysis.issues.length} 项待核对` : '，未发现需提示事项'}` : '未识别到权利要求书正文'}</span></button>
+              ? <button type="button" className="claim-basis-summary" onClick={() => setIsClaimBasisCollapsed(false)}><AlertTriangle size={14} /><span>{claimBasisAnalysis.claims.length ? `已校验 ${claimBasisAnalysis.claims.length} 项权利要求${claimBasisAnalysis.issues.filter((issue) => issue.severity !== '提示').length ? `，发现 ${claimBasisAnalysis.issues.filter((issue) => issue.severity !== '提示').length} 项风险` : '，未发现高/中风险'}` : '未识别到权利要求书正文'}</span></button>
               : <>
-                <p className="claim-basis-description">核对“所述 / 该 / 上述”等定指用语是否能沿从属引用链追溯到首次引入；多项从属按每条路径分别校验。</p>
+                <div className="claim-basis-toolbar"><p className="claim-basis-description">仅本地核对权利要求内部的首次引入、指代链与术语一致性。</p><button type="button" onClick={() => setIsClaimBasisShowAll((current) => !current)}>{isClaimBasisShowAll ? '仅看风险' : '显示全部'}</button></div>
                 {claimBasisAnalysis.claims.length === 0
                   ? <div className="claim-basis-empty">暂未识别到可解析的权利要求条目。请先在“文档结构”中确认权利要求书位置。</div>
-                  : claimBasisAnalysis.issues.length === 0
-                    ? <div className="claim-basis-clear"><Check size={16} /> 已校验 {claimBasisAnalysis.claims.length} 项权利要求，暂未发现需要人工核对的引用基础问题。</div>
-                    : <div className="claim-issue-list">{claimBasisAnalysis.issues.map((issue) => <button key={issue.id} type="button" className={`claim-issue ${activeClaimIssueId === issue.id ? 'active' : ''}`} onClick={() => navigateToClaimIssue(issue)}><div><span className={`claim-issue-severity ${issue.severity}`}>{issue.severity}</span><strong>权 {issue.claimNumber} · {issue.highlightText}</strong></div><p>{issue.message}</p><small>{issue.sources.length ? `引用基础：${issue.sources.map((source) => `权${source.claimNumber}“${source.term}”${source.preamble ? '（前序）' : ''}`).join('；')}` : `已检查 ${issue.paths.length} 条继承路径，未找到首次引入。`}</small></button>)}</div>}
+                  : <>
+                    {claimBasisIssueGroups.length === 0
+                      ? <div className="claim-basis-clear"><Check size={16} /> 已校验 {claimBasisAnalysis.claims.length} 项权利要求，暂未发现高/中风险。</div>
+                      : <div className="claim-issue-list">{claimBasisIssueGroups.map((group) => <section key={group.claimNumber} className="claim-issue-group"><div className="claim-issue-group-title"><strong>权利要求 {group.claimNumber}</strong><span>{group.issues.length} 项风险</span></div>{group.issues.map((issue) => {
+                        const expanded = expandedClaimIssueIds.has(issue.id)
+                        const active = activeClaimIssueId === issue.id
+                        return <article key={issue.id} className={`claim-issue ${active ? 'active' : ''}`} onClick={() => navigateToClaimIssue(issue)}>
+                          <div className="claim-issue-compact"><span className={`claim-issue-severity ${issue.severity}`}>{issue.severity}</span><strong>{issue.highlightText}</strong><span className="claim-issue-conclusion">{issue.conclusion}</span><button type="button" onClick={(event) => { event.stopPropagation(); toggleClaimIssueDetails(issue.id) }}>{expanded ? '收起详情' : '展开详情'}</button></div>
+                          {active && claimIssueOccurrenceCount > 0 && <div className="claim-issue-navigation" onClick={(event) => event.stopPropagation()}><span>{activeClaimIssueOccurrence + 1}/{claimIssueOccurrenceCount}</span><button type="button" onClick={() => navigateClaimIssueOccurrence(-1)} title="上一个相同术语" aria-label="上一个相同术语"><ArrowUp size={13} /></button><button type="button" onClick={() => navigateClaimIssueOccurrence(1)} title="下一个相同术语" aria-label="下一个相同术语"><ArrowDown size={13} /></button></div>}
+                          {expanded && <div className="claim-issue-details"><p>{issue.message}</p><small>{issue.sources.length ? `引用基础：${issue.sources.map((source) => `权${source.claimNumber}“${source.term}”${source.preamble ? '（前序）' : ''}`).join('；')}` : `已检查 ${issue.paths.length} 条继承路径，未找到首次引入。`}</small></div>}
+                        </article>
+                      })}</section>)}</div>}
+                    {!isClaimBasisShowAll && claimBasisLowRiskIssues.length > 0 && <section className="claim-basis-folded"><button type="button" onClick={() => setIsClaimBasisLowRiskOpen((current) => !current)}><span>低风险与可优化项</span><span>{claimBasisLowRiskIssues.length} 项 {isClaimBasisLowRiskOpen ? '收起' : '展开'}</span></button>{isClaimBasisLowRiskOpen && <div>{claimBasisLowRiskIssues.map((issue) => <button key={issue.id} type="button" onClick={() => navigateToClaimIssue(issue)}>权 {issue.claimNumber} · {issue.highlightText} · {issue.conclusion}</button>)}</div>}</section>}
+                    <section className="claim-basis-folded"><button type="button" onClick={() => setIsClaimBasisPassedOpen((current) => !current)}><span>已通过项</span><span>{claimBasisPassedClaims.length} 项 {isClaimBasisPassedOpen ? '收起' : '展开'}</span></button>{isClaimBasisPassedOpen && <p>{claimBasisPassedClaims.length ? `权利要求 ${claimBasisPassedClaims.join('、')} 未发现需提示的引用基础风险。` : '暂无可单独列示的已通过项。'}</p>}</section>
+                  </>}
               </>}
           </section>
-          <section className="llm-summary-card">
+          {LLM_REVIEW_ENABLED && <section className="llm-summary-card">
             <div><span><Sparkles size={16} /></span><div><strong>LLM 专利辅助审查</strong><small>{llmFindings.length ? `已生成 ${llmFindings.length} 条，采纳 ${llmFindings.filter((finding) => finding.accepted).length} 条` : `规则库 ${reviewRulebook.metadata.version} 已就绪`}</small></div></div>
             <button type="button" onClick={() => setIsLlmReviewOpen(true)}>{llmFindings.length ? '查看结果' : '开始审查'}</button>
             <p>辅助审查，不构成法律意见。采纳项保存为批注，完整结果另存为 Excel 报告。</p>
-          </section>
+          </section>}
           <div className="annotation-form">
             {selectedText ? <div className="selection-context"><div><span>已锁定原文选区</span><p>“{selectedText}”</p></div><button type="button" onClick={clearLockedSelection}>取消</button></div> : <div className="selection-guide">先在全文窗口选中原文；选区会保留在这里，再填写批注。</div>}
             <div className="form-row"><label>类型<select value={annotation.type} onChange={(event) => setAnnotation({ ...annotation, type: event.target.value })}><option>图文不一致</option><option>术语不一致</option><option>缺乏支持</option><option>表述不清楚</option><option>待核实</option><option>理解笔记</option></select></label><label>程度<select value={annotation.severity} onChange={(event) => setAnnotation({ ...annotation, severity: event.target.value })}><option>提示</option><option>一般</option><option>重要</option><option>阻塞</option></select></label></div>
@@ -1121,17 +1440,21 @@ function App() {
           </header>
           <div className="ocr-settings-form">
             <label>服务商<select value={ocrDraft.provider} onChange={(event) => setOcrDraft((current) => ({ ...current, provider: event.target.value as OcrProvider }))}>{(Object.keys(ocrProviderLabels) as OcrProvider[]).map((provider) => <option key={provider} value={provider}>{ocrProviderLabels[provider]}</option>)}</select></label>
+            {ocrDraft.provider === 'paddle-local' && <div className={`ocr-plugin-status ${paddlePluginStatus?.installed ? 'ready' : 'missing'}`}>
+              <div><strong>{paddlePluginStatus?.displayName ?? '本机 PaddleOCR 3（增强插件）'}</strong><span>{paddlePluginStatus?.installed ? `已安装${paddlePluginStatus.version ? ` · ${paddlePluginStatus.version}` : ''}` : '未安装'}</span><p>{paddlePluginStatus?.message ?? '正在检查本机 OCR 插件…'}</p></div>
+              <button type="button" className="quiet-button" onClick={() => { void installPaddlePlugin() }} disabled={isInstallingPaddlePlugin}>{isInstallingPaddlePlugin ? '正在安装…' : paddlePluginStatus?.installed ? '重新安装插件' : '选择插件 ZIP 安装'}</button>
+            </div>}
             {ocrDraft.provider === 'custom' && <label>接口名称<input value={ocrDraftProfile.interfaceName} onChange={(event) => setOcrDraft((current) => updateOcrProfile(current, current.provider, { interfaceName: event.target.value }))} placeholder="例如：公司内部 OCR" /></label>}
             {ocrDraft.provider === 'custom' && <label>服务器地址<input value={ocrDraftProfile.endpoint} onChange={(event) => setOcrDraft((current) => updateOcrProfile(current, current.provider, { endpoint: event.target.value }))} placeholder="完整的 OpenAI 兼容接口地址" /></label>}
-            {ocrDraft.provider !== 'local' && <label><span className="ocr-field-label">API Key{ocrProviderApiLinks[ocrDraft.provider] && <button type="button" className="ocr-api-link" aria-label="API 获取" onClick={() => { void openOcrApiLink(ocrDraft.provider) }}>（API 获取）</button>}</span><input type="password" value={ocrDraftProfile.apiKey} onChange={(event) => setOcrDraft((current) => updateOcrProfile(current, current.provider, { apiKey: event.target.value }))} placeholder={ocrDraft.provider === 'paddle-ocr' ? '粘贴 AI Studio Access Token' : '粘贴服务商提供的 API Key'} /></label>}
+            {ocrDraft.provider !== 'local' && ocrDraft.provider !== 'paddle-local' && <label><span className="ocr-field-label">API Key{ocrProviderApiLinks[ocrDraft.provider] && <button type="button" className="ocr-api-link" aria-label="API 获取" onClick={() => { void openOcrApiLink(ocrDraft.provider) }}>（API 获取）</button>}</span><input type="password" value={ocrDraftProfile.apiKey} onChange={(event) => setOcrDraft((current) => updateOcrProfile(current, current.provider, { apiKey: event.target.value }))} placeholder={ocrDraft.provider === 'paddle-ocr' ? '粘贴 AI Studio Access Token' : '粘贴服务商提供的 API Key'} /></label>}
             {(ocrDraft.provider === 'paddle-ocr' || ocrDraft.provider === 'custom') && <label>模型名称<input value={ocrDraftProfile.model} onChange={(event) => setOcrDraft((current) => updateOcrProfile(current, current.provider, { model: event.target.value }))} placeholder={ocrDraft.provider === 'paddle-ocr' ? 'PP-OCRv6' : '服务器中的视觉/OCR模型名称'} /></label>}
             <label className="ocr-remember"><input type="checkbox" checked={rememberOcrSettings} onChange={(event) => setRememberOcrSettings(event.target.checked)} /> 将设置和密钥保存在本机</label>
           </div>
-          <div className="ocr-privacy"><ShieldCheck size={15} /><span>{ocrDraft.provider === 'local' ? '本机 OCR 完全离线处理。' : '云 OCR 只上传右侧附图；正文、权利要求、批注和原始文件不会上传。'}</span></div>
+          <div className="ocr-privacy"><ShieldCheck size={15} /><span>{ocrDraft.provider === 'paddle-local' ? 'Paddle 插件安装后，本机 OCR 完全离线处理；主程序不携带模型和运行时。' : ocrDraft.provider === 'local' ? '基础本机 OCR 完全离线处理；可安装 PaddleOCR 增强插件以提高识别率。' : '云 OCR 只上传右侧附图；正文、权利要求、批注和原始文件不会上传。'}</span></div>
           <footer className="ocr-modal-actions"><button type="button" className="quiet-button" onClick={() => setIsOcrSettingsOpen(false)}>取消</button><button type="button" className="ocr-apply" onClick={applyOcrSettings}>应用识别方式</button></footer>
         </section>
       </div>}
-      <LlmReviewDialog
+      {LLM_REVIEW_ENABLED && <LlmReviewDialog
         open={isLlmReviewOpen}
         patentText={file.text}
         findings={llmFindings}
@@ -1141,7 +1464,7 @@ function App() {
         }}
         onClose={() => setIsLlmReviewOpen(false)}
         onNotice={setNotice}
-      />
+      />}
       {expandedFigure && <div className="figure-detail-backdrop" onClick={() => setExpandedFigure(null)}>
         <section className="figure-detail-dialog" role="dialog" aria-modal="true" aria-label={`附图 ${expandedFigure.index + 1} 详情`} onClick={(event) => event.stopPropagation()}>
           <header className="figure-detail-header">
@@ -1162,8 +1485,30 @@ function App() {
         </section>
       </div>}
       {isAuthorQrOpen && <AuthorQrDialog onClose={() => setIsAuthorQrOpen(false)} />}
+      {isExitConfirmOpen && <ExitConfirmDialog isSaving={isSavingBeforeExit} onCancel={cancelExitConfirmation} onExitWithoutSaving={() => { void exitWithoutSaving() }} onSaveAndExit={() => { void saveRevisionAndExit() }} />}
     </main>
   )
+}
+
+function ExitConfirmDialog({ isSaving, onCancel, onExitWithoutSaving, onSaveAndExit }: {
+  isSaving: boolean
+  onCancel: () => void
+  onExitWithoutSaving: () => void
+  onSaveAndExit: () => void
+}) {
+  return <div className="exit-confirm-backdrop" role="presentation" onMouseDown={onCancel}>
+    <section className="exit-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="exit-confirm-title" onMouseDown={(event) => event.stopPropagation()}>
+      <button type="button" className="exit-confirm-close" aria-label="取消退出" onClick={onCancel} disabled={isSaving}><X size={18} /></button>
+      <div className="exit-confirm-icon"><Save size={23} /></div>
+      <h2 id="exit-confirm-title">退出前是否保存修订版？</h2>
+      <p>保存后会在原文件同一目录生成“原文件名-修订版”，不会覆盖原文件。</p>
+      <div className="exit-confirm-actions">
+        <button type="button" className="exit-confirm-cancel" onClick={onCancel} disabled={isSaving}>取消</button>
+        <button type="button" className="exit-confirm-direct" onClick={onExitWithoutSaving} disabled={isSaving}>直接退出</button>
+        <button type="button" className="exit-confirm-save" onClick={onSaveAndExit} disabled={isSaving}>{isSaving ? '正在保存修订版…' : '保存修订版再退出'}</button>
+      </div>
+    </section>
+  </div>
 }
 
 function PdfPageView({ page, selectable, selectionRects = [] }: { page: PdfPageData; selectable: boolean; selectionRects?: NonNullable<PatentSelectionAnchor['pdfRects']> }) {
@@ -1191,7 +1536,7 @@ function PdfPageView({ page, selectable, selectionRects = [] }: { page: PdfPageD
 
 function BrandWithAuthor({ onFollowAuthor }: { onFollowAuthor: () => void }) {
   return <div className="brand-with-follow">
-    <div className="brand"><span className="brand-mark">阅</span><span>专利阅研</span></div>
+    <div className="brand"><span className="brand-mark"><img src={brandLogoUrl} alt="" /></span><span>专利阅研</span></div>
     <button type="button" className="follow-author-button" onClick={onFollowAuthor}><QrCode size={14} /> 关注作者</button>
   </div>
 }
@@ -1208,31 +1553,29 @@ function AuthorQrDialog({ onClose }: { onClose: () => void }) {
   </div>
 }
 
-function Welcome({ isOpening, notice, onOpen, onFollowAuthor, desktop }: { isOpening: boolean; notice: string; onOpen: () => void; onFollowAuthor: () => void; desktop: boolean }) {
+function Welcome({ isOpening, isCheckingUpdate, notice, onOpen, onDownloadGuide, onFollowAuthor, onUpdate, updateAvailable, desktop }: { isOpening: boolean; isCheckingUpdate: boolean; notice: string; onOpen: () => void; onDownloadGuide: () => void; onFollowAuthor: () => void; onUpdate: () => void; updateAvailable: boolean; desktop: boolean }) {
   return <main className="welcome-screen">
     <div className="welcome-top">
       <BrandWithAuthor onFollowAuthor={onFollowAuthor} />
-      <span>Windows 本地专利阅读工具</span>
+      <div className="welcome-top-actions"><span>Windows 本地专利阅读工具</span><button type="button" className={`welcome-update-button ${updateAvailable ? 'has-update' : ''}`} onClick={onUpdate} disabled={isCheckingUpdate}><RefreshCw size={14} className={isCheckingUpdate ? 'spinning-icon' : ''} />{isCheckingUpdate ? '检查中…' : updateAvailable ? '更新可用' : '检查更新'}</button></div>
     </div>
-    <section className="welcome-card"><div className="hero-icon"><BookOpenText size={30} /></div><span className="eyebrow">中文专利 · 本地优先</span><h1>从一份文件，读懂一项专利</h1><p>先确认说明书摘要、权利要求书、说明书和附图的位置，再开始图文联动阅读与专业批注。</p><button className="open-button" onClick={onOpen} disabled={isOpening || !desktop}><FolderOpen size={19} />{isOpening ? '正在读取文件…' : '打开 DOCX 或 PDF'}</button>{!desktop && <p className="desktop-hint">请通过桌面应用运行此工具后打开本地文件。</p>}{notice && <div className="welcome-notice">{notice}</div>}</section>
+    <section className="welcome-card"><div className="hero-icon"><BookOpenText size={30} /></div><span className="eyebrow">中文专利 · 本地优先</span><h1>从一份文件，读懂一项专利</h1><p>先确认说明书摘要、权利要求书、说明书和附图的位置，再开始图文联动阅读与专业批注。</p><button type="button" className="guide-download-button" onClick={onDownloadGuide}><Download size={15} /> 下载使用说明</button><button className="open-button" onClick={onOpen} disabled={isOpening || !desktop}><FolderOpen size={19} />{isOpening ? '正在读取文件…' : '打开 DOCX 或 PDF'}</button>{!desktop && <p className="desktop-hint">请通过桌面应用运行此工具后打开本地文件。</p>}{notice && <div className="welcome-notice">{notice}</div>}</section>
     <div className="welcome-features"><span><Check size={16} /> 内容仅在本机处理</span><span><Check size={16} /> 原文件不会被覆盖</span><span><Check size={16} /> 生成可交付修订版</span></div>
   </main>
 }
 
 function StructureConfirm({ file, sections, detectedCount, onBack, onUpdate, onConfirm }: { file: LoadedFile; sections: PatentSection[]; detectedCount: number; onBack: () => void; onUpdate: (key: SectionKey, value: string) => void; onConfirm: () => void }) {
   const highestDetectedPosition = Math.max(0, ...sections.map((section) => section.start ?? 0))
-  const positionCount = Math.max(4, file.markers.length, highestDetectedPosition)
+  const positionCount = Math.max(4, file.pageCount, file.markers.length, highestDetectedPosition)
   const locationOptions = Array.from({ length: positionCount }, (_, index) => {
     const position = index + 1
     const marker = file.markers[index]
     return {
       position,
-      label: file.extension === 'pdf'
-        ? `第 ${position} 页：${marker || '未识别页首'}`
-        : marker ? `第 ${position} 个页首：${marker}` : `第 ${position} 个页首/标题`,
+      label: marker ? `第 ${position} 页 · 页首：${marker}` : `第 ${position} 页 · 未识别页首`,
     }
   })
-  return <main className="structure-screen"><header className="structure-header"><div className="brand"><span className="brand-mark">阅</span><span>专利阅研</span></div><button className="quiet-button" onClick={onBack}><ArrowLeft size={16} /> 重新选择文件</button></header><section className="structure-card"><div className="step-badge">01</div><span className="eyebrow">首次打开 · 文档结构确认</span><h1>先确认这份专利的四个阅读区段</h1><p>不同机构的模板和区段顺序可能不同。我们已按页首与标题识别出 <strong>{detectedCount}/4</strong> 个区段；请花几秒核对后再开始分析。</p><div className="file-chip"><FileText size={17} /> {file.name}<span>{file.extension.toUpperCase()}</span></div><div className="section-cards">{sections.map((section) => <div key={section.key} className="section-card"><div className="section-card-icon">{section.key === 'drawings' ? <Image size={19} /> : <FileText size={19} />}</div><div className="section-card-copy"><strong>{section.label}</strong><span>{sectionCopy[section.key]}</span></div><label>识别位置<select value={section.start ?? ''} onChange={(event) => onUpdate(section.key, event.target.value)}><option value="">未识别 / 手动指定</option>{locationOptions.map((option) => <option key={option.position} value={option.position}>{option.label}</option>)}</select></label><span className={`confidence ${section.start ? 'confirmed' : ''}`}>{section.start ? '已识别' : '待确认'}</span></div>)}</div><div className="structure-footer"><span>确认后才会进行本地关联分析，且不会修改原文件。</span><button className="primary-button large" onClick={onConfirm}>确认并开始阅读 <ChevronRight size={17} /></button></div></section></main>
+  return <main className="structure-screen"><header className="structure-header"><div className="brand"><span className="brand-mark">阅</span><span>专利阅研</span></div><button className="quiet-button" onClick={onBack}><ArrowLeft size={16} /> 重新选择文件</button></header><section className="structure-card"><div className="step-badge">01</div><span className="eyebrow">首次打开 · 文档结构确认</span><h1>先确认这份专利的四个阅读区段</h1><p>不同机构的模板和区段顺序可能不同。每个区段以新页的页首为锚点；我们已识别出 <strong>{detectedCount}/4</strong> 个区段。若有误，直接按起始页修正即可。</p><div className="file-chip"><FileText size={17} /> {file.name}<span>{file.extension.toUpperCase()}</span></div><div className="section-cards">{sections.map((section) => <div key={section.key} className="section-card"><div className="section-card-icon">{section.key === 'drawings' ? <Image size={19} /> : <FileText size={19} />}</div><div className="section-card-copy"><strong>{section.label}</strong><span>{sectionCopy[section.key]}</span></div><label>起始页<select value={section.start ?? ''} onChange={(event) => onUpdate(section.key, event.target.value)}><option value="">未识别 / 手动指定</option>{locationOptions.map((option) => <option key={option.position} value={option.position}>{option.label}</option>)}</select></label><span className={`confidence ${section.start ? 'confirmed' : ''}`}>{section.start ? '已识别' : '待确认'}</span></div>)}</div><div className="structure-footer"><span>确认后才会进行本地关联分析，且不会修改原文件。</span><button className="primary-button large" onClick={onConfirm}>确认并开始阅读 <ChevronRight size={17} /></button></div></section></main>
 }
 
 export default App

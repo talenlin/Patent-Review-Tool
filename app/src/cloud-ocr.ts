@@ -34,8 +34,7 @@ export async function recognizeCloudFigureLabels(
   knownNumbers: ReadonlySet<string>,
   onProgress: (finished: number, total: number) => void,
 ): Promise<{ labels: FigureLabel[]; wordCount: number; imageCount: number }> {
-  if (!window.patentReader?.cloudOcr) throw new Error('当前桌面程序尚未启用云 OCR 桥接')
-  if (settings.provider === 'local') return { labels: [], wordCount: 0, imageCount: 0 }
+  if (!window.patentReader?.cloudOcr) throw new Error('当前桌面程序尚未启用本机 PaddleOCR / 云 OCR 桥接')
   const labels: FigureLabel[] = []
   let wordCount = 0
   for (const [imageIndex, image] of images.entries()) {
